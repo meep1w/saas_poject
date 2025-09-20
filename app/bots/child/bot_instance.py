@@ -780,6 +780,19 @@ def make_child_router(tenant_id: int) -> Router:
     async def on_start(m: Message):
         lang = await get_lang(tenant_id, m.from_user.id)
         acc = await get_or_create_access(tenant_id, m.from_user.id)
+        # сохраняем текущий username (если есть)
+        if m.from_user.username:
+            async with SessionLocal() as s:
+                await s.execute(
+                    UserAccess.__table__.update()
+                    .where(
+                        UserAccess.tenant_id == tenant_id,
+                        UserAccess.user_id == m.from_user.id
+                    )
+                    .values(username=m.from_user.username)
+                )
+                await s.commit()
+
         tnt = await get_tenant(tenant_id)
         sup = tnt.support_url or settings.SUPPORT_URL
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
@@ -1136,34 +1149,66 @@ def make_child_router(tenant_id: int) -> Router:
         if not wait:
             return
 
-        # поиск пользователей
-        # поиск пользователя по вводу администратора
+        # поиск пользователей (админ)
         if wait == "users_search":
             query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
 
-            async with SessionLocal() as s:
-                base = select(UserAccess).where(UserAccess.tenant_id == tenant_id)
+            like = f"%{query_raw}%"
 
-                conds = []
-                # TG ID (точное совпадение)
+            async with SessionLocal() as s:
+                # 1) прямой поиск в user_access
+                conds = [
+                    cast(UserAccess.user_id, String).ilike(like),
+                    UserAccess.click_id.ilike(like),
+                    cast(UserAccess.trader_id, String).ilike(like),
+                ]
+                # TG ID — точное совпадение тоже учитываем
                 if query_raw.isdigit():
                     conds.append(UserAccess.user_id == int(query_raw))
-                # частичный поиск по trader_id / click_id
-                like = f"%{query_raw}%"
-                conds.append(UserAccess.trader_id.ilike(like))
-                conds.append(UserAccess.click_id.ilike(like))
-                # чтобы можно было ввести часть TG ID как строку:
-                conds.append(cast(UserAccess.user_id, String).ilike(like))
+                # username (если сохранился в /start)
+                conds.append(cast(UserAccess.username, String).ilike(like))
 
-                res = await s.execute(base.where(or_(*conds)).order_by(UserAccess.id.desc()).limit(50))
+                res = await s.execute(
+                    select(UserAccess)
+                    .where(
+                        UserAccess.tenant_id == tenant_id,
+                        or_(*conds)
+                    )
+                    .order_by(UserAccess.id.desc())
+                    .limit(50)
+                )
                 items = res.scalars().all()
 
-            found = len(items)
-            txt = f"🔎 Результаты поиска: {found}"
-            # показываем первую страницу без пагинации
+                # 2) fallback через events: ищем trader_id/click_id в событиях
+                if not items:
+                    ev_rows = await s.execute(
+                        select(Event.click_id)
+                        .where(
+                            Event.tenant_id == tenant_id,
+                            or_(
+                                cast(Event.trader_id, String).ilike(like),
+                                Event.click_id.ilike(like),
+                            )
+                        )
+                        .limit(200)
+                    )
+                    click_ids = [r[0] for r in ev_rows.all()]
+                    if click_ids:
+                        res = await s.execute(
+                            select(UserAccess)
+                            .where(
+                                UserAccess.tenant_id == tenant_id,
+                                UserAccess.click_id.in_(click_ids)
+                            )
+                            .order_by(UserAccess.id.desc())
+                        )
+                        items = res.scalars().all()
+
+            txt = f"🔎 Результаты поиска: {len(items)}"
             kb = kb_users_list(items, page=0, more=False)
-            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "menu", txt, kb)
+            # экран админки, чтобы была админ-картинка
+            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
         # рассылка: текст

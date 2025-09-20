@@ -82,6 +82,7 @@ class UserAccess(Base):
     click_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     trader_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     total_deposits: Mapped[int] = mapped_column(Integer, default=0)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
