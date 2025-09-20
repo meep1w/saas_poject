@@ -34,7 +34,7 @@ from app.models import (
     ContentOverride,
 )
 from app.settings import settings
-
+from sqlalchemy import select, func, or_, cast, String
 
 # =========================
 #            i18n
@@ -700,9 +700,9 @@ def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
+def kb_users_list(items: list[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
     rows = []
-    # Кнопка поиска — над списком
+    # строка поиска сверху
     rows.append([InlineKeyboardButton(text="🔎 Поиск", callback_data="adm:users:search")])
 
     for ua in items:
@@ -714,9 +714,12 @@ def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeybo
             callback_data=f"adm:user:{ua.user_id}"
         )])
     nav = []
-    if page > 0: nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm:users:{page-1}"))
-    if more: nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"adm:users:{page+1}"))
-    if nav: rows.append(nav)
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm:users:{page-1}"))
+    if more:
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"adm:users:{page+1}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -856,6 +859,7 @@ def make_child_router(tenant_id: int) -> Router:
         tnt = await get_tenant(tenant_id_)
         return tnt.owner_telegram_id == user_id_
 
+
     @router.message(Command("admin"))
     async def on_admin(m: Message):
         if not await is_owner(tenant_id, m.from_user.id):
@@ -863,6 +867,14 @@ def make_child_router(tenant_id: int) -> Router:
             return
         title = await resolve_title(tenant_id, "ru", "admin")
         await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", title, kb_admin_main())
+
+    @router.callback_query(F.data == "adm:users:search")
+    async def adm_users_search(c: CallbackQuery):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        ADMIN_WAIT[(tenant_id, c.from_user.id)] = "users_search"
+        await c.message.answer("Введите TG ID, trader_id или часть click_id.")
+        await c.answer()
 
     @router.callback_query(F.data == "adm:menu")
     async def adm_menu(c: CallbackQuery):
@@ -1125,15 +1137,33 @@ def make_child_router(tenant_id: int) -> Router:
             return
 
         # поиск пользователей
+        # поиск пользователя по вводу администратора
         if wait == "users_search":
+            query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
-            results = await _search_users(m.bot, tenant_id, m.text.strip())
-            if not results:
-                await m.answer("Ничего не найдено.")
-                return
-            txt = f"🔎 Результаты поиска ({len(results)}):"
-            kb = kb_users_list(results[:PAGE_SIZE], page=0, more=False)
-            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
+
+            async with SessionLocal() as s:
+                base = select(UserAccess).where(UserAccess.tenant_id == tenant_id)
+
+                conds = []
+                # TG ID (точное совпадение)
+                if query_raw.isdigit():
+                    conds.append(UserAccess.user_id == int(query_raw))
+                # частичный поиск по trader_id / click_id
+                like = f"%{query_raw}%"
+                conds.append(UserAccess.trader_id.ilike(like))
+                conds.append(UserAccess.click_id.ilike(like))
+                # чтобы можно было ввести часть TG ID как строку:
+                conds.append(cast(UserAccess.user_id, String).ilike(like))
+
+                res = await s.execute(base.where(or_(*conds)).order_by(UserAccess.id.desc()).limit(50))
+                items = res.scalars().all()
+
+            found = len(items)
+            txt = f"🔎 Результаты поиска: {found}"
+            # показываем первую страницу без пагинации
+            kb = kb_users_list(items, page=0, more=False)
+            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "menu", txt, kb)
             return
 
         # рассылка: текст
@@ -1165,6 +1195,8 @@ def make_child_router(tenant_id: int) -> Router:
             fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
             await adm_content_edit(fake_cb)  # type: ignore[arg-type]
             return
+
+
 
         # параметры: числа
         if wait in ("param:min_dep", "param:plat"):
