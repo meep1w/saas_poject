@@ -1,4 +1,3 @@
-# app/bots/child/bot_instance.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +11,7 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command
+from aiogram.filters import Command, BaseFilter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
@@ -22,7 +21,7 @@ from aiogram.types import (
     FSInputFile,
     WebAppInfo,
 )
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, cast, String
 
 from app.db import SessionLocal
 from app.models import (
@@ -34,7 +33,6 @@ from app.models import (
     ContentOverride,
 )
 from app.settings import settings
-from sqlalchemy import select, func, or_, cast, String
 
 # =========================
 #            i18n
@@ -151,8 +149,8 @@ ASSETS = {
     "register": "register.jpg",
     "deposit": "deposit.jpg",
     "unlocked": "unlocked.jpg",
-    "admin": "admin.jpg",          # картинка админки
-    "platinum": "platinum.jpg",    # экран «Вы — Platinum»
+    "admin": "admin.jpg",
+    "platinum": "platinum.jpg",
 }
 ASSETS_DIR = Path("assets")
 
@@ -204,11 +202,9 @@ async def ensure_click_id(tenant_id: int, user_id: int) -> str:
         ua = res.scalar_one_or_none()
         cid = (ua.click_id if ua and ua.click_id else None) or make_click_id(tenant_id, user_id)
         if not ua:
-            await s.execute(
-                UserAccess.__table__.insert().values(
-                    tenant_id=tenant_id, user_id=user_id, click_id=cid
-                )
-            )
+            await s.execute(UserAccess.__table__.insert().values(
+                tenant_id=tenant_id, user_id=user_id, click_id=cid
+            ))
         elif not ua.click_id:
             await s.execute(
                 UserAccess.__table__.update().where(UserAccess.id == ua.id).values(click_id=cid)
@@ -256,17 +252,15 @@ async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
         )
         acc = res.scalar_one_or_none()
         if acc is None:
-            await s.execute(
-                UserAccess.__table__.insert().values(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    is_registered=False,
-                    has_deposit=False,
-                    unlocked_shown=False,
-                    is_platinum=False,
-                    platinum_shown=False,
-                )
-            )
+            await s.execute(UserAccess.__table__.insert().values(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_registered=False,
+                has_deposit=False,
+                unlocked_shown=False,
+                is_platinum=False,
+                platinum_shown=False,
+            ))
             await s.commit()
             res = await s.execute(
                 select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == user_id)
@@ -608,17 +602,15 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
         )
         access = a_res.scalar_one_or_none()
         if access is None:
-            await s.execute(
-                UserAccess.__table__.insert().values(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    is_registered=False,
-                    has_deposit=False,
-                    unlocked_shown=False,
-                    is_platinum=False,
-                    platinum_shown=False,
-                )
-            )
+            await s.execute(UserAccess.__table__.insert().values(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_registered=False,
+                has_deposit=False,
+                unlocked_shown=False,
+                is_platinum=False,
+                platinum_shown=False,
+            ))
             await s.commit()
             a_res = await s.execute(
                 select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == user_id)
@@ -685,6 +677,15 @@ ADMIN_WAIT: Dict[Tuple[int, int], str] = {}
 BROADCAST_STATE: Dict[Tuple[int, int], dict] = {}  # (tenant, owner) -> {"segment","text","photo_id"}
 
 PAGE_SIZE = 8
+
+
+# --------- Filter to accept numeric messages ONLY when waiting for channel id
+class WaitingChannelId(BaseFilter):
+    def __init__(self, tenant_id: int):
+        self.tenant_id = tenant_id
+
+    async def __call__(self, m: Message) -> bool:
+        return ADMIN_WAIT.get((self.tenant_id, m.from_user.id)) == "/set_channel_id"
 
 
 def kb_admin_main() -> InlineKeyboardMarkup:
@@ -886,7 +887,7 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = "users_search"
-        await c.message.answer("Введите TG ID, trader_id или часть click_id.")
+        await c.message.answer("Введите TG ID, @username, trader_id или часть click_id.")
         await c.answer()
 
     @router.callback_query(F.data == "adm:menu")
@@ -1106,7 +1107,7 @@ def make_child_router(tenant_id: int) -> Router:
             await s.commit()
         await m.answer(f"gate_channel_id сохранён: {ch_id}")
 
-    # ловим URL’ы
+    # ловим URL’ы (только когда ждём конкретную настройку)
     @router.message(F.text.regexp(r"^https?://\S+$"))
     async def admin_catch_url(m: Message):
         key = (tenant_id, m.from_user.id)
@@ -1129,7 +1130,8 @@ def make_child_router(tenant_id: int) -> Router:
         ADMIN_WAIT.pop(key, None)
         await m.answer(f"{col} сохранён: {url}")
 
-    @router.message(F.text.regexp(r"^-?\d{5,}$"))
+    # Числовой ввод: теперь срабатывает ТОЛЬКО когда реально ждём /set_channel_id
+    @router.message(WaitingChannelId(tenant_id) & F.text.regexp(r"^-?\d{5,}$"))
     async def admin_catch_id(m: Message):
         key = (tenant_id, m.from_user.id)
         cmd = ADMIN_WAIT.get(key)
@@ -1240,8 +1242,6 @@ def make_child_router(tenant_id: int) -> Router:
             fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
             await adm_content_edit(fake_cb)  # type: ignore[arg-type]
             return
-
-
 
         # параметры: числа
         if wait in ("param:min_dep", "param:plat"):
