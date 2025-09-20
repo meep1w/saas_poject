@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Env & local
+.venv/
+.env
+saas.db
+
+# PyCharm
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
