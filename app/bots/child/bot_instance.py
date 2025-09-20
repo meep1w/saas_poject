@@ -1150,64 +1150,41 @@ def make_child_router(tenant_id: int) -> Router:
             return
 
         # поиск пользователей (админ)
+        # поиск пользователя по вводу администратора
         if wait == "users_search":
             query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
 
+            import re
+            # выдёргиваем «цифровой» TG ID, даже если пришло "tg id: 123 456"
+            m_id = re.search(r"-?\d{5,}", query_raw)
             like = f"%{query_raw}%"
 
             async with SessionLocal() as s:
-                # 1) прямой поиск в user_access
-                conds = [
-                    cast(UserAccess.user_id, String).ilike(like),
-                    UserAccess.click_id.ilike(like),
-                    cast(UserAccess.trader_id, String).ilike(like),
-                ]
-                # TG ID — точное совпадение тоже учитываем
-                if query_raw.isdigit():
-                    conds.append(UserAccess.user_id == int(query_raw))
-                # username (если сохранился в /start)
-                conds.append(cast(UserAccess.username, String).ilike(like))
+                conds = []
+
+                # 1) точное совпадение по user_id, если удалось вытащить число
+                if m_id:
+                    tg_id = int(m_id.group(0))
+                    conds.append(UserAccess.user_id == tg_id)
+                    # и частичный поиск по user_id как по строке (на случай, если ввели лишь часть)
+                    conds.append(cast(UserAccess.user_id, String).like(f"%{tg_id}%"))
+
+                # 2) частичный поиск по trader_id / click_id / username
+                conds.append(UserAccess.trader_id.ilike(like))
+                conds.append(UserAccess.click_id.ilike(like))
+                conds.append(UserAccess.username.ilike(like))
 
                 res = await s.execute(
                     select(UserAccess)
-                    .where(
-                        UserAccess.tenant_id == tenant_id,
-                        or_(*conds)
-                    )
+                    .where(UserAccess.tenant_id == tenant_id, or_(*conds))
                     .order_by(UserAccess.id.desc())
                     .limit(50)
                 )
                 items = res.scalars().all()
 
-                # 2) fallback через events: ищем trader_id/click_id в событиях
-                if not items:
-                    ev_rows = await s.execute(
-                        select(Event.click_id)
-                        .where(
-                            Event.tenant_id == tenant_id,
-                            or_(
-                                cast(Event.trader_id, String).ilike(like),
-                                Event.click_id.ilike(like),
-                            )
-                        )
-                        .limit(200)
-                    )
-                    click_ids = [r[0] for r in ev_rows.all()]
-                    if click_ids:
-                        res = await s.execute(
-                            select(UserAccess)
-                            .where(
-                                UserAccess.tenant_id == tenant_id,
-                                UserAccess.click_id.in_(click_ids)
-                            )
-                            .order_by(UserAccess.id.desc())
-                        )
-                        items = res.scalars().all()
-
             txt = f"🔎 Результаты поиска: {len(items)}"
             kb = kb_users_list(items, page=0, more=False)
-            # экран админки, чтобы была админ-картинка
             await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
