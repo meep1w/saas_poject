@@ -193,7 +193,12 @@ async def pp_ftd(
     total = await user_deposit_sum(tenant_id, ua.click_id)
     if (not ua.is_platinum) and total >= thr:
         async with SessionLocal() as s:
-            await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(is_platinum=True))
+            await s.execute(
+                UserAccess.__table__
+                .update()
+                .where(UserAccess.id == ua.id)
+                .values(is_platinum=True, platinum_shown=False)  # <= сбрасываем, чтобы экран показался
+            )
             await s.commit()
 
     await _push_next_screen(ua.id)
@@ -228,7 +233,12 @@ async def pp_rd(
     total = await user_deposit_sum(tenant_id, ua.click_id)
     if (not ua.is_platinum) and total >= thr:
         async with SessionLocal() as s:
-            await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(is_platinum=True))
+            await s.execute(
+                UserAccess.__table__
+                .update()
+                .where(UserAccess.id == ua.id)
+                .values(is_platinum=True, platinum_shown=False)  # <= сброс флага показа
+            )
             await s.commit()
 
     await _push_next_screen(ua.id)
