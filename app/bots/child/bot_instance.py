@@ -1190,10 +1190,18 @@ def make_child_router(tenant_id: int) -> Router:
             "Обязательно включите макросы: {click_id}, {trader_id}, {sumdep}.\n\n"
             "<b>Регистрация</b>\n"
             f"<code>{base}/pp/reg?click_id={{click_id}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
+            "• click_id → <code>click_id</code>\n"
+            "• trader_id → <code>trader_id</code>\n\n"
             "<b>Первый депозит</b>\n"
             f"<code>{base}/pp/ftd?click_id={{click_id}}&sumdep={{sumdep}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
+            "• click_id → <code>click_id</code>\n"
+            "• trader_id → <code>trader_id</code>\n"
+            "• sumdep → <code>sumdep</code>\n\n"
             "<b>Повторный депозит</b>\n"
             f"<code>{base}/pp/rd?click_id={{click_id}}&sumdep={{sumdep}}&tid={tid}{sec}</code>\n"
+            "• click_id → <code>click_id</code>\n"
+            "• trader_id → <code>trader_id</code>\n"
+            "• sumdep → <code>sumdep</code>\n\n"
         )
 
     @router.callback_query(F.data == "adm:pb")
