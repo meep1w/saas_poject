@@ -846,6 +846,13 @@ def kb_bc_menu(state: dict) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
+            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+        ]
+    )
 
 # ---- Admin handlers
 def make_child_router(tenant_id: int) -> Router:
@@ -904,9 +911,9 @@ def make_child_router(tenant_id: int) -> Router:
         sup = tnt.support_url or settings.SUPPORT_URL
 
         ref = tnt.ref_link or settings.REF_LINK
-        text = build_howto_text(lang, ref)
+        text = build_howto_text(lang, ref)  # тот длинный текст с {{ref}}
 
-        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_open_app(lang, sup))
+        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_howto_min(lang, sup))
         await c.answer()
 
     @router.callback_query(F.data == "signal")
