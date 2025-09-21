@@ -160,6 +160,82 @@ ASSETS_DIR = Path("assets")
 # =========================
 #         Helpers
 # =========================
+def _render_ref_anchor(url: str) -> str:
+    # HTML ссылка на PocketOption (parse_mode="HTML" уже включен в Bot(...))
+    return f'<a href="{url}">PocketOption</a>'
+
+def build_howto_text(lang: str, ref_url: str) -> str:
+    ref = _render_ref_anchor(ref_url)
+
+    RU = (
+        "1. Зарегистрируйте аккаунт на брокере {{ref}}, обязательно через нашего бота, "
+        "для этого введите /start → «Получить сигнал» → «Зарегистрироваться».\n"
+        "2. Ожидайте автоматической проверки регистрации — бот оповестит.\n"
+        "3. После успешной проверки внесите депозит: /start → «Получить сигнал» → «Внести депозит».\n"
+        "4. Ожидайте автоматической проверки депозита — бот оповестит.\n"
+        "5. Нажмите «Получить сигнал».\n"
+        "6. Выберите инструмент для торговли в первой строке интерфейса бота.\n"
+        "7. Дублируйте этот инструмент на брокере {{ref}}.\n"
+        "8. Выберите модель торговли: TESSA Plus для обычных пользователей, TESSA Quantum для Platinum.\n"
+        "9. Выберите любое время экспирации.\n"
+        "10. Дублируйте то же время экспирации на брокере {{ref}}.\n"
+        "11. Нажмите «Сгенерировать сигнал» и торгуйте строго по аналитике бота, выбирайте более высокую вероятность.\n"
+        "12. Заработайте профит."
+    )
+
+    EN = (
+        "1. Create a broker account at {{ref}} — strictly via our bot: /start → “Get signal” → “Register”.\n"
+        "2. Wait for automatic registration check — the bot will notify you.\n"
+        "3. After approval, make a deposit: /start → “Get signal” → “Make a deposit”.\n"
+        "4. Wait for the automatic deposit check — the bot will notify you.\n"
+        "5. Tap “Get signal”.\n"
+        "6. Pick a trading instrument in the first line of the bot interface.\n"
+        "7. Mirror this instrument at {{ref}}.\n"
+        "8. Choose the trading model: TESSA Plus for regular users, TESSA Quantum for Platinum.\n"
+        "9. Choose any expiration time.\n"
+        "10. Mirror the same expiration time at {{ref}}.\n"
+        "11. Tap “Generate signal” and follow the bot’s analytics strictly, aiming for higher probability.\n"
+        "12. Take your profit."
+    )
+
+    ES = (
+        "1. Crea una cuenta en el bróker {{ref}} — estrictamente a través de nuestro bot: /start → «Obtener señal» → «Registrarse».\n"
+        "2. Espera la verificación automática del registro — el bot te avisará.\n"
+        "3. Tras la aprobación, realiza un depósito: /start → «Obtener señal» → «Hacer depósito».\n"
+        "4. Espera la verificación automática del depósito — el bot te avisará.\n"
+        "5. Pulsa «Obtener señal».\n"
+        "6. Elige el instrumento en la primera línea de la interfaz del bot.\n"
+        "7. Refleja este instrumento en {{ref}}.\n"
+        "8. Elige el modelo de trading: TESSA Plus para usuarios normales, TESSA Quantum para Platinum.\n"
+        "9. Elige cualquier tiempo de expiración.\n"
+        "10. Refleja el mismo tiempo de expiración en {{ref}}.\n"
+        "11. Pulsa «Generar señal» y sigue estrictamente la analítica del bot, apuntando a mayor probabilidad.\n"
+        "12. Obtén beneficios."
+    )
+
+    HI = (
+        "1. ब्रोकरेज {{ref}} पर खाता बनाएँ — केवल हमारे बॉट से: /start → “सिग्नल प्राप्त करें” → “रजिस्टर करें”.\n"
+        "2. रजिस्ट्रेशन की ऑटो जाँच की प्रतीक्षा करें — बॉट सूचित करेगा।\n"
+        "3. स्वीकृति के बाद डिपॉज़िट करें: /start → “सिग्नल प्राप्त करें” → “डिपॉज़िट करें”.\n"
+        "4. डिपॉज़िट की ऑटो जाँच की प्रतीक्षा करें — बॉट सूचित करेगा।\n"
+        "5. “सिग्नल प्राप्त करें” दबाएँ।\n"
+        "6. बॉट इंटरफ़ेस की पहली पंक्ति में ट्रेडिंग इंस्ट्रूमेंट चुनें।\n"
+        "7. यही इंस्ट्रूमेंट {{ref}} पर डुप्लिकेट करें।\n"
+        "8. ट्रेडिंग मॉडल चुनें: साधारण उपयोगकर्ताओं के लिए TESSA Plus, Platinum के लिए TESSA Quantum।\n"
+        "9. कोई भी एक्सपायरी समय चुनें।\n"
+        "10. वही एक्सपायरी समय {{ref}} पर भी सेट करें।\n"
+        "11. “सिग्नल जनरेट करें” दबाएँ और बॉट की एनालिटिक्स के अनुसार सख्ती से ट्रेड करें, उच्च संभावना चुनें।\n"
+        "12. मुनाफ़ा कमाएँ।"
+    )
+
+    mapping = {"ru": RU, "en": EN, "es": ES, "hi": HI}
+    txt = mapping.get(lang, EN)
+    # поддержим оба плейсхолдера
+    return txt.replace("{{ref}}", ref).replace("{{reff}}", ref)
+
+
+
+
 def t(lang: str, key: str) -> str:
     base = I18N.get(lang) or I18N["en"]
     return base.get(key) or I18N["en"].get(key, key)
@@ -826,8 +902,11 @@ def make_child_router(tenant_id: int) -> Router:
         lang = await get_lang(tenant_id, c.from_user.id)
         tnt = await get_tenant(tenant_id)
         sup = tnt.support_url or settings.SUPPORT_URL
-        title = await resolve_title(tenant_id, lang, "howto")
-        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", title, kb_open_app(lang, sup))
+
+        ref = tnt.ref_link or settings.REF_LINK
+        text = build_howto_text(lang, ref)
+
+        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_open_app(lang, sup))
         await c.answer()
 
     @router.callback_query(F.data == "signal")
@@ -886,7 +965,7 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = "users_search"
-        await c.message.answer("Введите TG ID, trader_id или часть click_id.")
+        await c.message.answer("Введите trader_id или click_id.")
         await c.answer()
 
     @router.callback_query(F.data == "adm:menu")
