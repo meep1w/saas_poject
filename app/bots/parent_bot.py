@@ -1,7 +1,7 @@
 # parent_bot.py
 from __future__ import annotations
 
-import asyncio
+import asyncio, html
 from typing import List, Tuple
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -18,6 +18,11 @@ from app.models import Tenant, UserAccess, Event
 
 router = Router()
 
+# --- GA / деплой/рестарт настройки ---
+REPO_DIR = "/opt/pocket_saas"          # рабочая папка репозитория (если скрипту деплоя нужна)
+DEPLOY_CMD = "/usr/local/bin/pocket_deploy"   # команда деплоя
+CHILD_SERVICE = "pocket-children"       # systemd unit children-ботов
+
 WELCOME_OK_RU = (
     "Привет! Вы член моей приватки — доступ разрешён.\n"
     "Отправьте API-ТОКЕН вашего бота, которого хотите подключить.\n"
@@ -26,6 +31,16 @@ WELCOME_OK_RU = (
 WELCOME_NO_RU = (
     "Извините, вы не находитесь в моей приватке. Напишите мне для уточнения информации."
 )
+
+
+async def _run(cmd: str, cwd: str | None = None) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_shell(
+        cmd, cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    return proc.returncode, (out.decode(errors="ignore") if out else "")
 
 # =========================
 #     Обычный parent /start
@@ -140,17 +155,24 @@ def _kb_tenants(items: List[Tenant], page: int, more: bool) -> InlineKeyboardMar
     rows.append([InlineKeyboardButton(text="↩️ Главное меню", callback_data="ga:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def _kb_tenant_card(t: Tenant) -> InlineKeyboardMarkup:
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def kb_tenant_card(t) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🔄 Deploy", callback_data=f"ga:tenant:{t.id}:deploy"),
-         InlineKeyboardButton(text="♻️ Restart service", callback_data=f"ga:tenant:{t.id}:restart")],
-        [InlineKeyboardButton(text="⏹ Stop service", callback_data=f"ga:tenant:{t.id}:stop")],
-        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data=f"ga:tenant:{t.id}:clear")],
-        [InlineKeyboardButton(text="🗑 Удалить тенант", callback_data=f"ga:tenant:{t.id}:delete")],
-        [InlineKeyboardButton(text="↩️ К списку", callback_data="ga:tenants:0"),
-         InlineKeyboardButton(text="↩️ Меню", callback_data="ga:menu")],
+        [
+            InlineKeyboardButton(text="▶️ Старт", callback_data=f"ga:t:{t.id}:start"),
+            InlineKeyboardButton(text="⏸ Пауза", callback_data=f"ga:t:{t.id}:pause"),
+            InlineKeyboardButton(text="🔁 Рестарт", callback_data=f"ga:t:{t.id}:restart"),
+        ],
+        [
+            InlineKeyboardButton(text="🚀 Деплой", callback_data=f"ga:t:{t.id}:deploy"),
+        ],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data=f"ga:t:{t.id}:users")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ga:t:{t.id}:delete")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="ga:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def _kb_confirm(cb_yes: str, back_cb: str, caption_yes: str = "✅ Да, подтвердить") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -262,7 +284,7 @@ async def ga_tenant_card(c: CallbackQuery):
         f"PB secret set: {bool(t.pb_secret)}",
     ]
     txt = "\n".join(lines)
-    await c.message.edit_text(txt, reply_markup=_kb_tenant_card(t))
+    await c.message.edit_text(txt, reply_markup=kb_tenant_card(t))
     await c.answer()
 
 # -------- global actions --------
@@ -275,26 +297,32 @@ async def ga_deploy(c: CallbackQuery):
     if log:
         await c.message.answer(f"<code>{log}</code>")
 
-@router.callback_query(F.data == "ga:restart")
+@router.callback_query(F.data.regexp(r"^ga:t:(\d+):restart$"))
 async def ga_restart(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    await c.answer("Рестартую сервисы…")
-    ok, log = await _run_shell("sudo systemctl restart pocket-children && sudo systemctl restart pocket-api")
-    await c.message.answer("♻️ Рестарт выполнен" if ok else "❌ Рестарт не удался")
-    if log:
-        await c.message.answer(f"<code>{log}</code>")
+    tid = int(c.data.split(":")[2])
+    await c.answer("Рестартую children…")
+    msg = await c.message.answer("⏳ Рестарт сервисов…")
+    rc, out = await _run(f"sudo /bin/systemctl restart {CHILD_SERVICE}")
+    tail = "\n".join(out.strip().splitlines()[-60:])
+    if rc == 0:
+        await msg.edit_text("✅ Рестарт завершён.\n\n<pre>" + html.escape(tail) + "</pre>")
+    else:
+        await msg.edit_text(f"❌ Рестарт завершился с кодом {rc}.\n\n<pre>{html.escape(tail)}</pre>")
+
 
 # -------- per-tenant actions --------
-@router.callback_query(F.data.endswith(":deploy") & F.data.startswith("ga:tenant:"))
-async def ga_t_deploy(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
+@router.callback_query(F.data.regexp(r"^ga:t:(\d+):deploy$"))
+async def ga_deploy(c: CallbackQuery):
     tid = int(c.data.split(":")[2])
-    await c.answer(f"Деплой (тенант #{tid})…")
-    # Пока деплой общий
-    ok, log = await _run_shell("sudo /usr/local/bin/pocket_deploy")
-    await c.message.answer(f"✅ Деплой (тенант #{tid}) завершён" if ok else f"❌ Деплой (тенант #{tid}) упал")
-    if log:
-        await c.message.answer(f"<code>{log}</code>")
+    await c.answer("Запускаю деплой…")
+    msg = await c.message.answer("⏳ Деплой начат, это может занять пару минут…")
+    rc, out = await _run(f"sudo {DEPLOY_CMD}", cwd=REPO_DIR)
+    tail = "\n".join((out or "").strip().splitlines()[-80:])
+    if rc == 0:
+        await msg.edit_text("✅ Деплой успешно завершён.\n\n<pre>" + html.escape(tail) + "</pre>")
+    else:
+        await msg.edit_text(f"❌ Деплой упал (код {rc}).\n\n<pre>{html.escape(tail)}</pre>")
+
 
 @router.callback_query(F.data.endswith(":restart") & F.data.startswith("ga:tenant:"))
 async def ga_t_restart(c: CallbackQuery):
