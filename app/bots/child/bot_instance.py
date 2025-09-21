@@ -769,6 +769,24 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
             return
 
+        # >>> АВТО-ВЫДАЧА PLATINUM по сумме депозитов
+    threshold = float(tenant.platinum_threshold_usd or 500.0)
+    total_now = await user_deposit_sum(tenant_id, cid)
+    if not access.is_platinum and total_now >= threshold:
+        async with SessionLocal() as s:
+            await s.execute(
+                UserAccess.__table__.update()
+                .where(
+                    UserAccess.tenant_id == tenant_id,
+                    UserAccess.user_id == user_id,
+                )
+                .values(is_platinum=True, platinum_shown=False)  # флаг показанного экрана сбрасываем
+            )
+            await s.commit()
+        access.is_platinum = True
+        access.platinum_shown = False
+    # <<<
+
     # 4) Platinum уведомление
     if access.is_platinum and not access.platinum_shown:
         text = f"<b>{t(lang, 'platinum_title')}</b>\n\n{t(lang, 'platinum_text')}"
