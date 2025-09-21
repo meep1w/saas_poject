@@ -93,14 +93,37 @@ async def _push_next_screen(ua_id: int):
             return
 
         # если проверка депозита включена — проверим минимум
+        # стало
         if tenant.check_deposit:
             total = await user_deposit_sum(ua.tenant_id, ua.click_id)
             need = float(tenant.min_deposit_usd or 0.0)
             if total < need:
-                dep_url = add_params(tenant.deposit_link or settings.DEPOSIT_LINK, click_id=ua.click_id, tid=ua.tenant_id)
+                def fmt(x: float) -> str:
+                    return f"{int(x)}" if abs(x - int(x)) < 1e-9 else f"{x:.2f}"
+
+                remain = max(need - total, 0.0)
+
+                hints = {
+                    "ru": (f"\n\n<b>Минимальный депозит:</b> {fmt(need)}$"
+                           f"\n<b>Внесено:</b> {fmt(total)}$"
+                           f"\n<b>Осталось внести:</b> {fmt(remain)}$"),
+                    "en": (f"\n\n<b>Minimum deposit:</b> {fmt(need)}$"
+                           f"\n<b>Deposited:</b> {fmt(total)}$"
+                           f"\n<b>Left to deposit:</b> {fmt(remain)}$"),
+                    "hi": (f"\n\n<b>न्यूनतम जमा:</b> {fmt(need)}$"
+                           f"\n<b>जमा किया गया:</b> {fmt(total)}$"
+                           f"\n<b>बाकी जमा करना:</b> {fmt(remain)}$"),
+                    "es": (f"\n\n<b>Depósito mínimo:</b> {fmt(need)}$"
+                           f"\n<b>Depositado:</b> {fmt(total)}$"
+                           f"\n<b>Falta depositar:</b> {fmt(remain)}$"),
+                }
+
+                dep_url = add_params(tenant.deposit_link or settings.DEPOSIT_LINK,
+                                     click_id=ua.click_id, tid=ua.tenant_id)
+                text = (f"<b>{t(lang, 'gate_dep_title')}</b>\n\n"
+                        f"{t(lang, 'gate_dep_text')}{hints.get(lang, hints['en'])}")
                 await send_screen(bot, ua.tenant_id, chat_id, lang, "deposit",
-                                  f"<b>{t(lang,'gate_dep_title')}</b>\n\n{t(lang,'gate_dep_text')}",
-                                  kb_deposit(lang, dep_url))
+                                  text, kb_deposit(lang, dep_url))
                 return
 
         # platinum
