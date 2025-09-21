@@ -231,11 +231,14 @@ async def ga_deploy(c: CallbackQuery):
         return
     await c.answer("Запускаю деплой…")
     code, out = await _run(DEPLOY_CMD, cwd=REPO_DIR)
-    head = html.escape("\n".join(out.strip().splitlines()[-25:]))  # хвост логов
-    if code == 0:
-        await c.message.answer(f"✅ Деплой успешно завершён.\n<pre>{head}</pre>")
+    tail = html.escape("\n".join(out.strip().splitlines()[-25:]))
+
+    # -15 == SIGTERM → скрипт убит рестартом сервисов — это ожидаемо
+    if code in (0, -15):
+        await c.message.answer(f"✅ Деплой завершён.\n<pre>{tail}</pre>")
     else:
-        await c.message.answer(f"❌ Деплой завершился с ошибкой (exit {code}).\n<pre>{head}</pre>")
+        await c.message.answer(f"❌ Деплой завершился с ошибкой (exit {code}).\n<pre>{tail}</pre>")
+
 
 
 @router.callback_query(F.data == "ga:restart_children")
