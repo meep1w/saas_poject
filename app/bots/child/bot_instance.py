@@ -721,13 +721,51 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
         return
 
     # 3) Депозит (если включён и не достигнут минимум)
+    # 3) Депозит (если включён и не достигнут минимум)
     if tenant.check_deposit:
         dep = tenant.deposit_link or settings.DEPOSIT_LINK
         dep_url = add_params(dep, click_id=cid, tid=tenant_id)
+
         total = await user_deposit_sum(tenant_id, cid)
         need = float(tenant.min_deposit_usd or 0.0)
+
         if total < need:
-            text = f"<b>{t(lang, 'gate_dep_title')}</b>\n\n{t(lang, 'gate_dep_text')}"
+            # красиво форматируем суммы (без .00, если целое)
+            def fmt(x: float) -> str:
+                return f"{int(x)}" if abs(x - int(x)) < 1e-9 else f"{x:.2f}"
+
+            remain = max(need - total, 0.0)
+
+            # локализованные подсказки
+            hints = {
+                "ru": (
+                    f"\n\n<b>Минимальный депозит:</b> {fmt(need)}$"
+                    f"\n<b>Внесено:</b> {fmt(total)}$"
+                    f"\n<b>Осталось внести:</b> {fmt(remain)}$"
+                ),
+                "en": (
+                    f"\n\n<b>Minimum deposit:</b> {fmt(need)}$"
+                    f"\n<b>Deposited:</b> {fmt(total)}$"
+                    f"\n<b>Left to deposit:</b> {fmt(remain)}$"
+                ),
+                "hi": (
+                    f"\n\n<b>न्यूनतम जमा:</b> {fmt(need)}$"
+                    f"\n<b>जमा किया गया:</b> {fmt(total)}$"
+                    f"\n<b>बाकी जमा करना:</b> {fmt(remain)}$"
+                ),
+                "es": (
+                    f"\n\n<b>Depósito mínimo:</b> {fmt(need)}$"
+                    f"\n<b>Depositado:</b> {fmt(total)}$"
+                    f"\n<b>Falta depositar:</b> {fmt(remain)}$"
+                ),
+            }
+            hint = hints.get(lang, hints["en"])
+
+            text = (
+                f"<b>{t(lang, 'gate_dep_title')}</b>\n\n"
+                f"{t(lang, 'gate_dep_text')}{hint}"
+            )
+
             await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
             return
 
@@ -1169,16 +1207,23 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id): return
         action = c.data.split(":")[-1]
         key = (tenant_id, c.from_user.id)
-        if action == "ref":
-            ADMIN_WAIT[key] = "/set_ref_link";  await c.message.answer("Пришлите новую <b>реф-ссылку</b> (https://...)", parse_mode="HTML")
+
+        if action == "chan":
+            ADMIN_WAIT[key] = "/set_channel_id"
+            await c.message.answer("Пришлите <b>ID канала</b> вида -1001234567890", parse_mode="HTML")
+        elif action == "ref":
+            ADMIN_WAIT[key] = "/set_ref_link";
+            await c.message.answer("Пришлите новую <b>реф-ссылку</b> (https://...)", parse_mode="HTML")
         elif action == "dep":
-            ADMIN_WAIT[key] = "/set_deposit_link";  await c.message.answer("Пришлите новую <b>ссылку депозита</b> (https://...)", parse_mode="HTML")
-        elif action == "chan":
-            ADMIN_WAIT[key] = "/set_channel_id";  await c.message.answer("Пришлите <b>ID канала</b> вида -1001234567890", parse_mode="HTML")
+            ADMIN_WAIT[key] = "/set_deposit_link";
+            await c.message.answer("Пришлите новую <b>ссылку депозита</b> (https://...)", parse_mode="HTML")
         elif action == "support":
-            ADMIN_WAIT[key] = "/set_support_url"; await c.message.answer("Пришлите новый <b>Support URL</b> (https://...)", parse_mode="HTML")
+            ADMIN_WAIT[key] = "/set_support_url";
+            await c.message.answer("Пришлите новый <b>Support URL</b> (https://...)", parse_mode="HTML")
         elif action == "pbsec":
-            ADMIN_WAIT[key] = "/set_pb_secret";   await c.message.answer("Пришлите новый секрет (латиница/цифры), можно «-» чтобы очистить.", parse_mode="HTML")
+            ADMIN_WAIT[key] = "/set_pb_secret";
+            await c.message.answer("Пришлите новый секрет (латиница/цифры), можно «-» чтобы очистить.",
+                                   parse_mode="HTML")
         await c.answer()
 
     # команды-сеттеры
@@ -1199,7 +1244,22 @@ def make_child_router(tenant_id: int) -> Router:
         cmd = ADMIN_WAIT.get(key)
         if not cmd:
             return
+
         url = m.text.strip()
+        if cmd == "/set_channel_url":
+            async with SessionLocal() as s:
+                await s.execute(Tenant.__table__.update()
+                                .where(Tenant.id == tenant_id)
+                                .values(gate_channel_url=url))
+                await s.commit()
+            ADMIN_WAIT.pop(key, None)
+            await m.answer("Супер, сохранил ✅")
+            # вернёмся в раздел «Ссылки», чтобы админ видел актуальные значения
+            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:links")
+            await adm_links(fake_cb)  # type: ignore[arg-type]
+            return
+
+        # прочие URL-сеттеры остаются как были:
         col_map = {
             "/set_channel_url": "gate_channel_url",
             "/set_ref_link": "ref_link",
@@ -1221,12 +1281,18 @@ def make_child_router(tenant_id: int) -> Router:
         cmd = ADMIN_WAIT.get(key)
         if cmd != "/set_channel_id":
             return
+
         ch_id = int(m.text.strip())
         async with SessionLocal() as s:
-            await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(gate_channel_id=ch_id))
+            await s.execute(Tenant.__table__.update()
+                            .where(Tenant.id == tenant_id)
+                            .values(gate_channel_id=ch_id))
             await s.commit()
-        ADMIN_WAIT.pop(key, None)
-        await m.answer(f"gate_channel_id сохранён: {ch_id}")
+
+        # переключаемся на ожидание URL
+        ADMIN_WAIT[key] = "/set_channel_url"
+        await m.answer(f"gate_channel_id сохранён: {ch_id}\n"
+                       "Теперь пришлите публичную ссылку на канал (https://t.me/…)")
 
     @router.message(F.text)
     async def catch_admin_text(m: Message):
