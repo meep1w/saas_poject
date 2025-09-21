@@ -1,31 +1,63 @@
-# parent_bot.py
+# app/bots/parent_bot.py
 from __future__ import annotations
 
-import asyncio, html
-from typing import List, Tuple
+import asyncio
+import html
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramForbiddenError
 
 from sqlalchemy import select, func
 
 from app.settings import settings
 from app.db import SessionLocal
-from app.models import Tenant, UserAccess, Event
+from app.models import (
+    Tenant, UserAccess, Event,
+    ContentOverride, UserLang, UserState,
+)
 
 router = Router()
 
-# --- GA / деплой/рестарт настройки ---
-REPO_DIR = "/opt/pocket_saas"          # рабочая папка репозитория (если скрипту деплоя нужна)
-DEPLOY_CMD = "/usr/local/bin/pocket_deploy"   # команда деплоя
-CHILD_SERVICE = "pocket-children"       # systemd unit children-ботов
+# ----------------- GA / деплой / сервисы -----------------
+REPO_DIR = "/opt/pocket_saas"                 # рабочая папка проекта (если деплой-скрипту нужна)
+DEPLOY_CMD = "/usr/local/bin/pocket_deploy"   # твой деплой-скрипт
+CHILD_SERVICE = "pocket-children"             # systemd unit с детскими ботами
 
+PAGE_SIZE = 8
+
+
+async def _run(cmd: str, cwd: str | None = None) -> tuple[int, str]:
+    """Запуск shell-команды и возврат (код_выхода, stdout+stderr)."""
+    proc = await asyncio.create_subprocess_shell(
+        cmd, cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()
+    text = out.decode(errors="ignore") if out else ""
+    return proc.returncode, text
+
+
+def _is_ga(uid: int) -> bool:
+    return uid in set(settings.GA_ADMIN_IDS or [])
+
+
+def _fmt_money(x: float | int | None) -> str:
+    try:
+        val = float(x or 0)
+        return f"${int(val)}" if abs(val - int(val)) < 1e-9 else f"${val:.2f}"
+    except Exception:
+        return "$0"
+
+
+# ----------------- обычное /start + привязка токена -----------------
 WELCOME_OK_RU = (
     "Привет! Вы член моей приватки — доступ разрешён.\n"
-    "Отправьте API-ТОКЕН вашего бота, которого хотите подключить.\n"
+    "Отправьте API-токен вашего бота, которого хотите подключить.\n"
     "Важно: можно подключить только *1 бота*."
 )
 WELCOME_NO_RU = (
@@ -33,18 +65,6 @@ WELCOME_NO_RU = (
 )
 
 
-async def _run(cmd: str, cwd: str | None = None) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_shell(
-        cmd, cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    out, _ = await proc.communicate()
-    return proc.returncode, (out.decode(errors="ignore") if out else "")
-
-# =========================
-#     Обычный parent /start
-# =========================
 @router.message(Command("start"))
 async def on_start(m: Message):
     user_id = m.from_user.id
@@ -57,9 +77,7 @@ async def on_start(m: Message):
             await m.answer(WELCOME_NO_RU)
             return
     except TelegramForbiddenError:
-        await m.answer(
-            "Я не админ в приватном канале. Добавьте меня админом и повторите."
-        )
+        await m.answer("Я не админ в приватном канале. Добавьте меня админом и повторите.")
         return
 
     async with SessionLocal() as s:
@@ -70,6 +88,7 @@ async def on_start(m: Message):
                 f"У вас уже подключён бот @{tenant.bot_username}. "
                 f"Если хотите заменить — отправьте новый токен, старый будет отключён."
             )
+
 
 @router.message(F.text.regexp(r"^\d{6,}:[A-Za-z0-9_-]{20,}$"))
 async def on_token(m: Message):
@@ -109,315 +128,258 @@ async def on_token(m: Message):
         f"https://t.me/{username if username else 'your_bot'}"
     )
 
-# =========================================================
-#                Глобальная админка: /ga
-# =========================================================
 
-PAGE_SIZE = 10
-
-def _ga_admin_ids() -> List[int]:
-    """
-    Список супер-админов берём из settings.GA_ADMIN_IDS.
-    Может быть либо списком int, либо строкой "123,456".
-    """
-    v = getattr(settings, "GA_ADMIN_IDS", [])
-    if isinstance(v, str):
-        try:
-            return [int(x) for x in v.replace(" ", "").split(",") if x]
-        except Exception:
-            return []
-    return list(v or [])
-
-def _is_ga(user_id: int) -> bool:
-    return user_id in _ga_admin_ids()
-
-def _kb_ga_main(tenants_count: int) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"🧩 Тенанты ({tenants_count})", callback_data="ga:tenants:0")],
-        [InlineKeyboardButton(text="🔄 Deploy", callback_data="ga:deploy"),
-         InlineKeyboardButton(text="♻️ Restart", callback_data="ga:restart")],
-        [InlineKeyboardButton(text="🔁 Обновить", callback_data="ga:refresh")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def _kb_tenants(items: List[Tenant], page: int, more: bool) -> InlineKeyboardMarkup:
-    rows = []
-    for t in items:
-        cap = f"{t.id} • @{t.bot_username or '—'}"
-        rows.append([InlineKeyboardButton(text=cap, callback_data=f"ga:tenant:{t.id}")])
+# ----------------- Сверх-админка /ga -----------------
+def _kb_ga_home(tenants, page: int, more: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    # верхний ряд: Деплой / Рестарт
+    rows.append([
+        InlineKeyboardButton(text="🚀 Деплой", callback_data="ga:deploy"),
+        InlineKeyboardButton(text="🔄 Рестарт детей", callback_data="ga:restart_children"),
+    ])
+    # список тенантов
+    for t in tenants:
+        name = f"@{t.bot_username}" if t.bot_username else f"id={t.id}"
+        badge = "🟢" if t.is_active else "⏸"
+        rows.append([InlineKeyboardButton(text=f"{badge} Тенант #{t.id} {name}", callback_data=f"ga:t:{t.id}")])
+    # навигация
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ga:tenants:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ga:home:{page-1}"))
     if more:
-        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"ga:tenants:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"ga:home:{page+1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text="↩️ Главное меню", callback_data="ga:menu")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-def kb_tenant_card(t) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(text="▶️ Старт", callback_data=f"ga:t:{t.id}:start"),
-            InlineKeyboardButton(text="⏸ Пауза", callback_data=f"ga:t:{t.id}:pause"),
-            InlineKeyboardButton(text="🔁 Рестарт", callback_data=f"ga:t:{t.id}:restart"),
-        ],
-        [
-            InlineKeyboardButton(text="🚀 Деплой", callback_data=f"ga:t:{t.id}:deploy"),
-        ],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data=f"ga:t:{t.id}:users")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ga:t:{t.id}:delete")],
-        [InlineKeyboardButton(text="🏠 Меню", callback_data="ga:menu")],
-    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _kb_confirm(cb_yes: str, back_cb: str, caption_yes: str = "✅ Да, подтвердить") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=caption_yes, callback_data=cb_yes)],
-        [InlineKeyboardButton(text="↩️ Отмена", callback_data=back_cb)],
-    ])
+def _kb_tenant_card(t: Tenant) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if t.is_active:
+        rows.append([InlineKeyboardButton(text="⏸ Пауза", callback_data=f"ga:t:pause:{t.id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="▶️ Старт", callback_data=f"ga:t:start:{t.id}")])
+    rows.append([InlineKeyboardButton(text="🔁 Рестарт детей", callback_data=f"ga:t:restart:{t.id}")])
+    # вспомогательные
+    rows.append([InlineKeyboardButton(text="🧹 Удалить", callback_data=f"ga:t:delete_confirm:{t.id}")])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="ga:home:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-async def _run_shell(cmd: str) -> Tuple[bool, str]:
-    """
-    Запускаем shell-команду; нужен доступ (sudoers без пароля для указанных команд).
-    Возвращаем (ok, tail_log).
-    """
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    out, _ = await proc.communicate()
-    text = (out or b"").decode("utf-8", errors="ignore")
-    return (proc.returncode == 0), (text[-4000:] if text else "")
 
-async def _stats_text() -> Tuple[str, int]:
-    async with SessionLocal() as s:
-        tenants_count = (await s.execute(select(func.count()).select_from(Tenant))).scalar() or 0
-        users_rows = (await s.execute(select(func.count()).select_from(UserAccess))).scalar() or 0
-        uniq_users = (await s.execute(select(func.count(func.distinct(UserAccess.user_id))).select_from(UserAccess))).scalar() or 0
-        dep_sum = (await s.execute(
-            select(func.coalesce(func.sum(Event.amount), 0.0)).where(Event.kind.in_(("ftd", "rd")))
-        )).scalar() or 0.0
-        dep_cnt = (await s.execute(
-            select(func.count()).select_from(Event).where(Event.kind.in_(("ftd", "rd")))
-        )).scalar() or 0
-
-    txt = (
-        "🧠 Global Admin\n\n"
-        f"• Тенантов: {tenants_count}\n"
-        f"• Пользователей (строк): {users_rows}\n"
-        f"• Уникальных TG ID: {uniq_users}\n"
-        f"• Депозитов: {dep_cnt}\n"
-        f"• Сумма депозитов: {dep_sum:.2f}$\n"
-    )
-    return txt, tenants_count
-
-async def _tenants_page(page: int) -> Tuple[List[Tenant], bool, int]:
-    async with SessionLocal() as s:
-        total = (await s.execute(select(func.count()).select_from(Tenant))).scalar() or 0
-        res = await s.execute(
-            select(Tenant).order_by(Tenant.id.desc()).offset(page * PAGE_SIZE).limit(PAGE_SIZE)
-        )
-        items = res.scalars().all()
-    more = (page + 1) * PAGE_SIZE < total
-    return items, more, total
-
-# -------- /ga entry --------
 @router.message(Command("ga"))
 async def ga_entry(m: Message):
     if not _is_ga(m.from_user.id):
-        await m.answer("Доступ запрещён.")
         return
-    txt, tenants_count = await _stats_text()
-    await m.answer(txt, reply_markup=_kb_ga_main(tenants_count))
+    await _ga_home(m)
 
-@router.callback_query(F.data == "ga:menu")
-async def ga_menu(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    txt, tenants_count = await _stats_text()
-    await c.message.edit_text(txt, reply_markup=_kb_ga_main(tenants_count))
-    await c.answer()
 
-@router.callback_query(F.data == "ga:refresh")
-async def ga_refresh(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    await ga_menu(c)
-
-# -------- tenants list --------
-@router.callback_query(F.data.startswith("ga:tenants:"))
-async def ga_tenants(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    page = int(c.data.split(":")[2])
-    items, more, total = await _tenants_page(page)
-    cap = f"🧩 Тенанты ({total})\nВыберите бота:"
-    await c.message.edit_text(cap, reply_markup=_kb_tenants(items, page, more))
-    await c.answer()
-
-# -------- tenant card (view) --------
-@router.callback_query(F.data.startswith("ga:tenant:") & ~F.data.endswith((":deploy", ":restart", ":stop", ":clear", ":clear:yes", ":delete", ":delete:yes")))
-async def ga_tenant_card(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
+async def _ga_home(m_or_c: Message | CallbackQuery, page: int = 0):
+    # суммарная статистика
     async with SessionLocal() as s:
-        t = (await s.execute(select(Tenant).where(Tenant.id == tid))).scalar_one_or_none()
+        t_count = (await s.execute(select(func.count()).select_from(Tenant))).scalar() or 0
+        u_total = (await s.execute(select(func.count()).select_from(UserAccess))).scalar() or 0
+        u_reg = (await s.execute(
+            select(func.count()).select_from(UserAccess).where(UserAccess.is_registered == True)
+        )).scalar() or 0
+        u_dep = (await s.execute(
+            select(func.count()).select_from(UserAccess).where(UserAccess.has_deposit == True)
+        )).scalar() or 0
+        u_vip = (await s.execute(
+            select(func.count()).select_from(UserAccess).where(UserAccess.is_platinum == True)
+        )).scalar() or 0
+        dep_sum = (await s.execute(
+            select(func.coalesce(func.sum(Event.amount), 0.0)).where(Event.kind.in_(("ftd", "rd")))
+        )).scalar() or 0.0
+
+        res = await s.execute(
+            select(Tenant).order_by(Tenant.id.asc()).offset(page * PAGE_SIZE).limit(PAGE_SIZE)
+        )
+        tenants = res.scalars().all()
+        more = (page + 1) * PAGE_SIZE < t_count
+
+    txt = (
+        "📊 <b>Глобальная статистика</b>\n"
+        f"Тенантов: {t_count}\n"
+        f"Пользователей: {u_total}\n"
+        f"Регистраций: {u_reg}\n"
+        f"С депозитом: {u_dep}\n"
+        f"Platinum: {u_vip}\n"
+        f"Сумма депозитов: {_fmt_money(dep_sum)}\n\n"
+        "Выберите тенанта:"
+    )
+    kb = _kb_ga_home(tenants, page, more)
+
+    if isinstance(m_or_c, CallbackQuery):
+        await m_or_c.message.edit_text(txt, reply_markup=kb)
+        await m_or_c.answer()
+    else:
+        await m_or_c.answer(txt, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("ga:home:"))
+async def ga_home_cb(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    page = int(c.data.split(":")[2])
+    await _ga_home(c, page=page)
+
+
+# ---- Deploy / Restart (глобальные) ----
+@router.callback_query(F.data == "ga:deploy")
+async def ga_deploy(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    await c.answer("Запускаю деплой…")
+    code, out = await _run(DEPLOY_CMD, cwd=REPO_DIR)
+    head = html.escape("\n".join(out.strip().splitlines()[-25:]))  # хвост логов
+    if code == 0:
+        await c.message.answer(f"✅ Деплой успешно завершён.\n<pre>{head}</pre>")
+    else:
+        await c.message.answer(f"❌ Деплой завершился с ошибкой (exit {code}).\n<pre>{head}</pre>")
+
+
+@router.callback_query(F.data == "ga:restart_children")
+async def ga_restart_children(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    await c.answer("Перезапускаю детей…")
+    code, out = await _run(f"systemctl restart {CHILD_SERVICE}")
+    if code == 0:
+        await c.message.answer("✅ Дети перезапущены.")
+    else:
+        tail = html.escape("\n".join(out.strip().splitlines()[-20:]))
+        await c.message.answer(f"❌ Не удалось перезапустить: exit {code}\n<pre>{tail}</pre>")
+
+
+# ---- Карточка тенанта ----
+async def _tenant_stats(tid: int) -> dict:
+    async with SessionLocal() as s:
+        total = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tid))).scalar() or 0
+        regs = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tid, UserAccess.is_registered == True))).scalar() or 0
+        deps = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tid, UserAccess.has_deposit == True))).scalar() or 0
+        plats = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tid, UserAccess.is_platinum == True))).scalar() or 0
+        dep_sum = (await s.execute(
+            select(func.coalesce(func.sum(Event.amount), 0.0)).where(Event.tenant_id == tid, Event.kind.in_(("ftd", "rd")))
+        )).scalar() or 0.0
+    return {"total": total, "regs": regs, "deps": deps, "plats": plats, "sum": dep_sum}
+
+
+def _format_tenant_card(t: Tenant, st: dict) -> str:
+    lines = [
+        f"📦 <b>Тенант #{t.id}</b>",
+        f"Имя: {t.bot_username or '—'}",
+        f"Статус: {'ACTIVE' if t.is_active else 'PAUSED'}",
+        f"Admin ID: {t.owner_telegram_id}",
+        f"Канал (обяз.): {t.gate_channel_id or 'None'} / {t.gate_channel_url or 'None'}",
+        f"Поддержка: {t.support_url or 'None'}",
+        f"Порог Platinum: {int(t.platinum_threshold_usd or 0)}",
+        "",
+        "📈 <b>Статистика</b>",
+        f"Пользователей: {st['total']}",
+        f"Регистраций: {st['regs']}",
+        f"С депозитом: {st['deps']}",
+        f"Platinum: {st['plats']}",
+        f"Сумма депозитов: {_fmt_money(st['sum'])}",
+    ]
+    return "\n".join(lines)
+
+
+async def _show_tenant_card(c: CallbackQuery, tenant_id: int):
+    async with SessionLocal() as s:
+        res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
+        t = res.scalar_one_or_none()
     if not t:
         await c.answer("Тенант не найден", show_alert=True)
         return
-    lines = [
-        f"🧾 Тенант #{t.id}",
-        f"@{t.bot_username or '—'}",
-        "",
-        f"Owner TG: {getattr(t, 'owner_telegram_id', None) or '—'}",
-        f"Support URL: {t.support_url or '—'}",
-        f"Channel ID: {t.gate_channel_id or '—'}",
-        f"Channel URL: {t.gate_channel_url or '—'}",
-        f"Ref link: {t.ref_link or '—'}",
-        f"Deposit link: {t.deposit_link or '—'}",
-        f"Check subscription: {bool(getattr(t, 'check_subscription', True))}",
-        f"Check deposit: {bool(getattr(t, 'check_deposit', True))}",
-        f"Min deposit $: {int(getattr(t, 'min_deposit_usd', 0) or 0)}",
-        f"Platinum threshold $: {int(getattr(t, 'platinum_threshold_usd', 500) or 500)}",
-        f"PB secret set: {bool(t.pb_secret)}",
-    ]
-    txt = "\n".join(lines)
-    await c.message.edit_text(txt, reply_markup=kb_tenant_card(t))
+    st = await _tenant_stats(tenant_id)
+    txt = _format_tenant_card(t, st)
+    await c.message.edit_text(txt, reply_markup=_kb_tenant_card(t))
     await c.answer()
 
-# -------- global actions --------
-@router.callback_query(F.data == "ga:deploy")
-async def ga_deploy(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    await c.answer("Запускаю деплой…")
-    ok, log = await _run_shell("sudo /usr/local/bin/pocket_deploy")
-    await c.message.answer("✅ Деплой завершён" if ok else "❌ Деплой не прошёл")
-    if log:
-        await c.message.answer(f"<code>{log}</code>")
 
-@router.callback_query(F.data.regexp(r"^ga:t:(\d+):restart$"))
-async def ga_restart(c: CallbackQuery):
+@router.callback_query(F.data.startswith("ga:t:") & ~F.data.contains(":start:") & ~F.data.contains(":pause:") &
+                       ~F.data.contains(":restart:") & ~F.data.contains(":delete"))
+async def ga_tenant_open(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
     tid = int(c.data.split(":")[2])
-    await c.answer("Рестартую children…")
-    msg = await c.message.answer("⏳ Рестарт сервисов…")
-    rc, out = await _run(f"sudo /bin/systemctl restart {CHILD_SERVICE}")
-    tail = "\n".join(out.strip().splitlines()[-60:])
-    if rc == 0:
-        await msg.edit_text("✅ Рестарт завершён.\n\n<pre>" + html.escape(tail) + "</pre>")
-    else:
-        await msg.edit_text(f"❌ Рестарт завершился с кодом {rc}.\n\n<pre>{html.escape(tail)}</pre>")
+    await _show_tenant_card(c, tid)
 
 
-# -------- per-tenant actions --------
-@router.callback_query(F.data.regexp(r"^ga:t:(\d+):deploy$"))
-async def ga_deploy(c: CallbackQuery):
-    tid = int(c.data.split(":")[2])
-    await c.answer("Запускаю деплой…")
-    msg = await c.message.answer("⏳ Деплой начат, это может занять пару минут…")
-    rc, out = await _run(f"sudo {DEPLOY_CMD}", cwd=REPO_DIR)
-    tail = "\n".join((out or "").strip().splitlines()[-80:])
-    if rc == 0:
-        await msg.edit_text("✅ Деплой успешно завершён.\n\n<pre>" + html.escape(tail) + "</pre>")
-    else:
-        await msg.edit_text(f"❌ Деплой упал (код {rc}).\n\n<pre>{html.escape(tail)}</pre>")
-
-
-@router.callback_query(F.data.endswith(":restart") & F.data.startswith("ga:tenant:"))
-async def ga_t_restart(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
-    await c.answer(f"Рестарт сервисов для тенанта #{tid}…")
-    ok, log = await _run_shell("sudo systemctl restart pocket-children")
-    await c.message.answer(f"♻️ Рестарт (тенант #{tid}) выполнен" if ok else f"❌ Рестарт (тенант #{tid}) не удался")
-    if log:
-        await c.message.answer(f"<code>{log}</code>")
-
-@router.callback_query(F.data.endswith(":stop") & F.data.startswith("ga:tenant:"))
-async def ga_t_stop(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
-    await c.message.answer(
-        f"⚠️ Остановить сервис для тенанта #{tid}? Это остановит всех ботов.",
-        reply_markup=_kb_confirm(
-            cb_yes=f"ga:tenant:{tid}:stop:yes",
-            back_cb=f"ga:tenant:{tid}",
-            caption_yes="⏹ Да, остановить pocket-children",
-        )
-    )
-    await c.answer()
-
-@router.callback_query(F.data.endswith(":stop:yes") & F.data.startswith("ga:tenant:"))
-async def ga_t_stop_yes(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    ok, log = await _run_shell("sudo systemctl stop pocket-children")
-    await c.message.answer("⏹ Остановлено" if ok else "❌ Команда не удалась")
-    if log:
-        await c.message.answer(f"<code>{log}</code>")
-    await c.answer()
-
-@router.callback_query(F.data.endswith(":clear") & F.data.startswith("ga:tenant:"))
-async def ga_t_clear(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
-    await c.message.answer(
-        f"🧹 Очистить БД для тенанта #{tid}? Удалятся users, events, overrides.",
-        reply_markup=_kb_confirm(cb_yes=f"ga:tenant:{tid}:clear:yes", back_cb=f"ga:tenant:{tid}")
-    )
-    await c.answer()
-
-@router.callback_query(F.data.endswith(":clear:yes") & F.data.startswith("ga:tenant:"))
-async def ga_t_clear_yes(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
+@router.callback_query(F.data.startswith("ga:t:start:"))
+async def ga_tenant_start(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    tid = int(c.data.split(":")[3])
     async with SessionLocal() as s:
-        await s.execute(UserAccess.__table__.delete().where(UserAccess.tenant_id == tid))
-        await s.execute(Event.__table__.delete().where(Event.tenant_id == tid))
-        # опционально — если модели присутствуют в вашем проекте:
-        try:
-            from app.models import ContentOverride, UserLang, UserState
-            await s.execute(ContentOverride.__table__.delete().where(ContentOverride.tenant_id == tid))
-            await s.execute(UserLang.__table__.delete().where(UserLang.tenant_id == tid))
-            await s.execute(UserState.__table__.delete().where(UserState.tenant_id == tid))
-        except Exception:
-            pass
+        await s.execute(Tenant.__table__.update().where(Tenant.id == tid).values(is_active=True))
         await s.commit()
-    await c.message.answer(f"🧹 Готово: данные тенанта #{tid} очищены.")
-    await c.answer()
+    await _run(f"systemctl restart {CHILD_SERVICE}")
+    await c.answer("Включен и перезапущены дети")
+    await _show_tenant_card(c, tid)
 
-@router.callback_query(F.data.endswith(":delete") & F.data.startswith("ga:tenant:"))
-async def ga_t_delete(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
-    await c.message.answer(
-        f"🗑 Удалить тенант #{tid} полностью? Это необратимо.",
-        reply_markup=_kb_confirm(cb_yes=f"ga:tenant:{tid}:delete:yes", back_cb=f"ga:tenant:{tid}")
+
+@router.callback_query(F.data.startswith("ga:t:pause:"))
+async def ga_tenant_pause(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    tid = int(c.data.split(":")[3])
+    async with SessionLocal() as s:
+        await s.execute(Tenant.__table__.update().where(Tenant.id == tid).values(is_active=False))
+        await s.commit()
+    await _run(f"systemctl restart {CHILD_SERVICE}")
+    await c.answer("Поставлен на паузу")
+    await _show_tenant_card(c, tid)
+
+
+@router.callback_query(F.data.startswith("ga:t:restart:"))
+async def ga_tenant_restart(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    tid = int(c.data.split(":")[3])
+    await c.answer("Перезапускаю детей…")
+    await _run(f"systemctl restart {CHILD_SERVICE}")
+    await _show_tenant_card(c, tid)
+
+
+@router.callback_query(F.data.startswith("ga:t:delete_confirm:"))
+async def ga_tenant_delete_confirm(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    tid = int(c.data.split(":")[3])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❗️ Да, удалить навсегда", callback_data=f"ga:t:delete:{tid}")],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data=f"ga:t:{tid}")],
+    ])
+    await c.message.edit_text(
+        "Вы уверены? Будут удалены сам тенант и <b>все связанные данные</b> (пользователи, события, состояния, контент).",
+        reply_markup=kb
     )
     await c.answer()
 
-@router.callback_query(F.data.endswith(":delete:yes") & F.data.startswith("ga:tenant:"))
-async def ga_t_delete_yes(c: CallbackQuery):
-    if not _is_ga(c.from_user.id): return
-    tid = int(c.data.split(":")[2])
+
+@router.callback_query(F.data.startswith("ga:t:delete:"))
+async def ga_tenant_delete(c: CallbackQuery):
+    if not _is_ga(c.from_user.id):
+        return
+    tid = int(c.data.split(":")[3])
+
+    # Полная очистка данных тенанта
     async with SessionLocal() as s:
-        await s.execute(UserAccess.__table__.delete().where(UserAccess.tenant_id == tid))
+        await s.execute(UserState.__table__.delete().where(UserState.tenant_id == tid))
+        await s.execute(UserLang.__table__.delete().where(UserLang.tenant_id == tid))
         await s.execute(Event.__table__.delete().where(Event.tenant_id == tid))
-        try:
-            from app.models import ContentOverride, UserLang, UserState
-            await s.execute(ContentOverride.__table__.delete().where(ContentOverride.tenant_id == tid))
-            await s.execute(UserLang.__table__.delete().where(UserLang.tenant_id == tid))
-            await s.execute(UserState.__table__.delete().where(UserState.tenant_id == tid))
-        except Exception:
-            pass
+        await s.execute(UserAccess.__table__.delete().where(UserAccess.tenant_id == tid))
+        await s.execute(ContentOverride.__table__.delete().where(ContentOverride.tenant_id == tid))
         await s.execute(Tenant.__table__.delete().where(Tenant.id == tid))
         await s.commit()
-    await c.message.answer(f"🗑 Тенант #{tid} удалён.")
+
+    await _run(f"systemctl restart {CHILD_SERVICE}")
+    await c.message.edit_text("🗑 Тенант и все его данные удалены. Дети перезапущены.")
     await c.answer()
 
-# =========================
-#          Runner
-# =========================
+
+# ----------------- Раннер -----------------
 async def run_parent():
     bot = Bot(settings.PARENT_BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
