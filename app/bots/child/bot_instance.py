@@ -37,6 +37,8 @@ from app.models import (
 )
 from app.settings import settings
 
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
 # =========================
 #            i18n
 # =========================
@@ -1245,8 +1247,8 @@ def make_child_router(tenant_id: int) -> Router:
         await m.answer(f"gate_channel_id сохранён: {ch_id}")
 
     # ловим URL’ы
-    @router.message(F.text.regexp(r"^https?://\S+$"))
-    async def admin_catch_url(m: Message):
+    @router.message(StateFilter(None), F.text.regexp(r"^https?://\S+$"))
+    async def admin_catch_url(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         cmd = ADMIN_WAIT.get(key)
         if not cmd:
@@ -1282,8 +1284,8 @@ def make_child_router(tenant_id: int) -> Router:
         ADMIN_WAIT.pop(key, None)
         await m.answer(f"{col} сохранён: {url}")
 
-    @router.message(F.text.regexp(r"^-?\d{5,}$"))
-    async def admin_catch_id(m: Message):
+    @router.message(StateFilter(None), F.text.regexp(r"^-?\d{5,}$"))
+    async def admin_catch_id(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         cmd = ADMIN_WAIT.get(key)
         if cmd != "/set_channel_id":
@@ -1301,8 +1303,8 @@ def make_child_router(tenant_id: int) -> Router:
         await m.answer(f"gate_channel_id сохранён: {ch_id}\n"
                        "Теперь пришлите публичную ссылку на канал (https://t.me/…)")
 
-    @router.message(F.text)
-    async def catch_admin_text(m: Message):
+    @router.message(StateFilter(None), F.text)
+    async def catch_admin_text(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         wait = ADMIN_WAIT.get(key)
         if not wait:
@@ -1501,7 +1503,7 @@ def make_child_router(tenant_id: int) -> Router:
         await adm_content_edit(c)
 
     # --- Контент: ловим фото (и уважаем FSM рассылки)
-    @router.message(F.photo)
+    @router.message(StateFilter(None), F.photo)
     async def adm_content_catch_image(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         wait = ADMIN_WAIT.get(key)
