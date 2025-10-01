@@ -12,8 +12,10 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -22,7 +24,7 @@ from aiogram.types import (
     FSInputFile,
     WebAppInfo,
 )
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, cast, String
 
 from app.db import SessionLocal
 from app.models import (
@@ -34,7 +36,6 @@ from app.models import (
     ContentOverride,
 )
 from app.settings import settings
-from sqlalchemy import select, func, or_, cast, String
 
 # =========================
 #            i18n
@@ -164,6 +165,7 @@ def _render_ref_anchor(url: str) -> str:
     # HTML ссылка на PocketOption (parse_mode="HTML" уже включен в Bot(...))
     return f'<a href="{url}">PocketOption</a>'
 
+
 def build_howto_text(lang: str, ref_url: str) -> str:
     ref = _render_ref_anchor(ref_url)
 
@@ -232,8 +234,6 @@ def build_howto_text(lang: str, ref_url: str) -> str:
     txt = mapping.get(lang, EN)
     # поддержим оба плейсхолдера
     return txt.replace("{{ref}}", ref).replace("{{reff}}", ref)
-
-
 
 
 def t(lang: str, key: str) -> str:
@@ -353,6 +353,11 @@ async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
 
 async def mark_unlocked_shown(tenant_id: int, user_id: int):
     async with SessionLocal() as s:
+        await s.execute(
+            UserState.__table__.update()
+            .where(UserState.tenant_id == tenant_id, UserState.chat_id == user_id)
+            .values(last_bot_message_id=None)
+        )
         await s.execute(
             UserAccess.__table__.update()
             .where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == user_id)
@@ -721,7 +726,6 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
         return
 
     # 3) Депозит (если включён и не достигнут минимум)
-    # 3) Депозит (если включён и не достигнут минимум)
     if tenant.check_deposit:
         dep = tenant.deposit_link or settings.DEPOSIT_LINK
         dep_url = add_params(dep, click_id=cid, tid=tenant_id)
@@ -769,7 +773,7 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
             return
 
-        # >>> АВТО-ВЫДАЧА PLATINUM по сумме депозитов
+    # >>> АВТО-ВЫДАЧА PLATINUM по сумме депозитов
     threshold = float(tenant.platinum_threshold_usd or 500.0)
     total_now = await user_deposit_sum(tenant_id, cid)
     if not access.is_platinum and total_now >= threshold:
@@ -813,11 +817,8 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
 # =========================
 #        Admin section
 # =========================
-ADMIN_WAIT: Dict[Tuple[int, int], str] = {}
-BROADCAST_STATE: Dict[Tuple[int, int], dict] = {}  # (tenant, owner) -> {"segment","text","photo_id"}
-
+ADMIN_WAIT: Dict[Tuple[int, int], str] = {}  # используется для поиска, параметров и редактора контента
 PAGE_SIZE = 8
-
 
 def kb_admin_main() -> InlineKeyboardMarkup:
     rows = [
@@ -830,7 +831,6 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 def kb_users_list(items: list[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
     rows = []
@@ -855,7 +855,6 @@ def kb_users_list(items: list[UserAccess], page: int, more: bool) -> InlineKeybo
     rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 def kb_user_card(ua: UserAccess) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=("Выдать регистрацию ✅" if not ua.is_registered else "Снять регистрацию ❌"),
@@ -869,7 +868,6 @@ def kb_user_card(ua: UserAccess) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 def kb_links() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="Изменить реф-ссылку", callback_data="adm:links:set:ref")],
@@ -881,26 +879,10 @@ def kb_links() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 def kb_postbacks(tenant_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")]
     ])
-
-
-def kb_bc_menu(state: dict) -> InlineKeyboardMarkup:
-    seg = state.get("segment", "all")
-    rows = [
-        [InlineKeyboardButton(text=("✅ Всем" if seg == "all" else "Всем"), callback_data="adm:bc:seg:all"),
-         InlineKeyboardButton(text=("✅ С регистрацией" if seg == "reg" else "С регистрацией"), callback_data="adm:bc:seg:reg")],
-        [InlineKeyboardButton(text=("✅ С депозитом" if seg == "dep" else "С депозитом"), callback_data="adm:bc:seg:dep"),
-         InlineKeyboardButton(text=("✅ Только /start" if seg == "nosteps" else "Только /start"), callback_data="adm:bc:seg:nosteps")],
-        [InlineKeyboardButton(text="📝 Задать текст", callback_data="adm:bc:text"),
-         InlineKeyboardButton(text="🖼️ Прикрепить фото", callback_data="adm:bc:photo")],
-        [InlineKeyboardButton(text="🚀 Запустить", callback_data="adm:bc:run")],
-        [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1013,7 +995,6 @@ def make_child_router(tenant_id: int) -> Router:
     async def is_owner(tenant_id_: int, user_id_: int) -> bool:
         tnt = await get_tenant(tenant_id_)
         return tnt.owner_telegram_id == user_id_
-
 
     @router.message(Command("admin"))
     async def on_admin(m: Message):
@@ -1328,7 +1309,6 @@ def make_child_router(tenant_id: int) -> Router:
             return
 
         # поиск пользователей (админ)
-        # поиск пользователя по вводу администратора
         if wait == "users_search":
             query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
@@ -1366,16 +1346,6 @@ def make_child_router(tenant_id: int) -> Router:
             await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
-        # рассылка: текст
-        if wait == "bc_text":
-            state = BROADCAST_STATE.setdefault(key, {"segment": "all"})
-            state["text"] = m.text.strip()
-            ADMIN_WAIT.pop(key, None)
-            await m.answer("Текст сохранён ✅")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:bc")
-            await adm_bc(fake_cb)  # type: ignore[arg-type]
-            return
-
         # контент: заголовок
         if wait.startswith("content_title:"):
             _, lang, screen = wait.split(":")
@@ -1395,8 +1365,6 @@ def make_child_router(tenant_id: int) -> Router:
             fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
             await adm_content_edit(fake_cb)  # type: ignore[arg-type]
             return
-
-
 
         # параметры: числа
         if wait in ("param:min_dep", "param:plat"):
@@ -1532,18 +1500,17 @@ def make_child_router(tenant_id: int) -> Router:
         await c.answer("Сброшено")
         await adm_content_edit(c)
 
+    # --- Контент: ловим фото (и уважаем FSM рассылки)
     @router.message(F.photo)
-    async def adm_content_catch_image(m: Message):
+    async def adm_content_catch_image(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         wait = ADMIN_WAIT.get(key)
+
+        # Если сейчас идёт сценарий рассылки и ожидается фото — отдельный хендлер ниже (WAIT_PHOTO) поймает первым.
+        # Здесь работаем только с редактором контента.
         if not wait or not wait.startswith("content_img:"):
-            # возможно это фото для рассылки
-            state = BROADCAST_STATE.setdefault(key, {"segment": "all"})
-            state["photo_id"] = m.photo[-1].file_id
-            await m.answer("Фото прикреплено.")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:bc")
-            await adm_bc(fake_cb)  # type: ignore[arg-type]
-            return
+            return  # не мешаем другим сценариям
+
         _, lang, screen = wait.split(":")
         file_id = m.photo[-1].file_id
         await upsert_override(tenant_id, lang, screen, image_path=file_id)
@@ -1618,51 +1585,164 @@ def make_child_router(tenant_id: int) -> Router:
         await c.message.answer("Пришлите новый <b>порог Platinum</b> в $ (целое или дробное).", parse_mode="HTML")
         await c.answer()
 
-    # ---- Broadcast
+    # =========================
+    #   Admin: Рассылка (FSM)
+    # =========================
+    class BcFSM(StatesGroup):
+        WAIT_SEGMENT = State()
+        WAIT_TEXT = State()
+        WAIT_PHOTO = State()
+        WAIT_VIDEO = State()
+
+    def kb_bc_segments() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Всем", callback_data="adm:bc:seg:all"),
+                InlineKeyboardButton(text="С регистрацией", callback_data="adm:bc:seg:reg"),
+            ],
+            [
+                InlineKeyboardButton(text="С депозитом", callback_data="adm:bc:seg:dep"),
+                InlineKeyboardButton(text="Только /start", callback_data="adm:bc:seg:nosteps"),
+            ],
+            [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
+        ])
+
+    def kb_bc_actions(has_photo: bool, has_video: bool) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=("➕ Добавить картинку" if not has_photo else "🔁 Сменить картинку"),
+                    callback_data="adm:bc:add_photo"
+                ),
+                InlineKeyboardButton(
+                    text=("➕ Добавить видео" if not has_video else "🔁 Сменить видео"),
+                    callback_data="adm:bc:add_video"
+                ),
+            ],
+            [InlineKeyboardButton(text="🚀 Запустить", callback_data="adm:bc:run_now")],
+            [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     @router.callback_query(F.data == "adm:bc")
-    async def adm_bc(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        state = BROADCAST_STATE.setdefault((tenant_id, c.from_user.id), {"segment": "all"})
-        txt = "📰 Рассылка\n\nСегмент: " + {
-            "all": "всем", "reg": "с регистрацией", "dep": "с депозитом", "nosteps": "/start без шагов"
-        }[state["segment"]]
-        if state.get("text"):
-            txt += f"\n\nТекст: {state['text'][:80]}..."
-        if state.get("photo_id"):
-            txt += "\n\nФото: прикреплено"
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", txt, kb_bc_menu(state))
+    async def adm_bc_entry(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        # каждый раз начинаем новую «сессию рассылки»
+        await state.clear()
+        await state.set_state(BcFSM.WAIT_SEGMENT)
+        await c.message.answer("Выберите получателей рассылки:", reply_markup=kb_bc_segments())
         await c.answer()
 
-    @router.callback_query(F.data.startswith("adm:bc:seg:"))
-    async def adm_bc_seg(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        seg = c.data.split(":")[-1]
-        state = BROADCAST_STATE.setdefault((tenant_id, c.from_user.id), {"segment": "all"})
-        state["segment"] = seg
-        await adm_bc(c)
-
-    @router.callback_query(F.data == "adm:bc:text")
-    async def adm_bc_text(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        ADMIN_WAIT[(tenant_id, c.from_user.id)] = "bc_text"
-        await c.message.answer("Пришлите текст рассылки одним сообщением.")
+    @router.callback_query(StateFilter(BcFSM.WAIT_SEGMENT), F.data.startswith("adm:bc:seg:"))
+    async def adm_bc_segment_pick(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        seg = c.data.split(":")[-1]  # all|reg|dep|nosteps
+        await state.update_data(segment=seg, text=None, photo_id=None, video_id=None)
+        await state.set_state(BcFSM.WAIT_TEXT)
+        await c.message.answer("Отправьте текст рассылки одним сообщением.")
         await c.answer()
 
-    @router.callback_query(F.data == "adm:bc:photo")
-    async def adm_bc_photo(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+    @router.message(StateFilter(BcFSM.WAIT_TEXT))
+    async def adm_bc_set_text(m: Message, state: FSMContext):
+        if not await is_owner(tenant_id, m.from_user.id):
+            return
+        if not (m.text and m.text.strip()):
+            await m.answer("Нужен именно текст. Пришлите его одним сообщением.")
+            return
+        await state.update_data(text=m.text.strip())
+        data = await state.get_data()
+        await m.answer(
+            "Текст сохранён и готов к рассылке. Добавить что-нибудь ещё?",
+            reply_markup=kb_bc_actions(
+                has_photo=bool(data.get("photo_id")),
+                has_video=bool(data.get("video_id")),
+            ),
+        )
+
+    @router.callback_query(F.data == "adm:bc:add_photo")
+    async def adm_bc_ask_photo(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        data = await state.get_data()
+        if not data.get("text"):
+            await c.answer("Сначала пришлите текст рассылки.", show_alert=True)
+            return
+        await state.set_state(BcFSM.WAIT_PHOTO)
         await c.message.answer("Пришлите фотографию одним сообщением.")
         await c.answer()
 
-    @router.callback_query(F.data == "adm:bc:run")
-    async def adm_bc_run(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        state = BROADCAST_STATE.get((tenant_id, c.from_user.id)) or {}
-        text = state.get("text") or " "
-        photo_id = state.get("photo_id")
-        seg = state.get("segment", "all")
+    @router.message(StateFilter(BcFSM.WAIT_PHOTO))
+    async def adm_bc_set_photo(m: Message, state: FSMContext):
+        if not await is_owner(tenant_id, m.from_user.id):
+            return
+        if not m.photo:
+            await m.answer("Нужна именно фотография. Пришлите её одним сообщением.")
+            return
+        photo_id = m.photo[-1].file_id
+        await state.update_data(photo_id=photo_id)
+        data = await state.get_data()
+        # возвращаемся в «готово к запуску»
+        await state.set_state(BcFSM.WAIT_TEXT)
+        await m.answer(
+            "Картинка сохранена. Что дальше?",
+            reply_markup=kb_bc_actions(
+                has_photo=True,
+                has_video=bool(data.get("video_id")),
+            ),
+        )
 
-        # выбираем аудиторию
+    @router.callback_query(F.data == "adm:bc:add_video")
+    async def adm_bc_ask_video(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        data = await state.get_data()
+        if not data.get("text"):
+            await c.answer("Сначала пришлите текст рассылки.", show_alert=True)
+            return
+        await state.set_state(BcFSM.WAIT_VIDEO)
+        await c.message.answer("Пришлите видео одним сообщением.")
+        await c.answer()
+
+    @router.message(StateFilter(BcFSM.WAIT_VIDEO))
+    async def adm_bc_set_video(m: Message, state: FSMContext):
+        if not await is_owner(tenant_id, m.from_user.id):
+            return
+        if not m.video:
+            await m.answer("Нужно именно видео (как видео-сообщение), пришлите одним сообщением.")
+            return
+        video_id = m.video.file_id
+        await state.update_data(video_id=video_id)
+        data = await state.get_data()
+        await state.set_state(BcFSM.WAIT_TEXT)
+        await m.answer(
+            "Видео сохранено. Что дальше?",
+            reply_markup=kb_bc_actions(
+                has_photo=bool(data.get("photo_id")),
+                has_video=True,
+            ),
+        )
+
+    @router.callback_query(F.data == "adm:bc:run_now")
+    async def adm_bc_run_now(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+
+        data = await state.get_data()
+        seg = data.get("segment")
+        text = (data.get("text") or "").strip()
+        photo_id = data.get("photo_id")
+        video_id = data.get("video_id")
+
+        if not seg:
+            await c.answer("Выберите сегмент получателей.", show_alert=True);
+            return
+        if not text:
+            await c.answer("Нужно отправить текст рассылки.", show_alert=True);
+            return
+
+        # аудитория
         async with SessionLocal() as s:
             q = select(UserAccess.user_id).where(UserAccess.tenant_id == tenant_id)
             if seg == "reg":
@@ -1671,45 +1751,52 @@ def make_child_router(tenant_id: int) -> Router:
                 q = q.where(UserAccess.has_deposit == True)
             elif seg == "nosteps":
                 q = q.where((UserAccess.is_registered == False) & (UserAccess.has_deposit == False))
-            ids = [r[0] for r in (await s.execute(q)).all()]
+            rows = (await s.execute(q)).all()
+            ids = [r[0] for r in rows]
+
+        total = len(ids)
+        if total == 0:
+            await c.answer("Нет получателей под выбранный сегмент.", show_alert=True)
+            await state.clear()
+            return
 
         bot = c.bot
+        progress_msg = await c.message.answer(f"Стартую рассылку… Получателей: {total}")
         ok = 0
-        for uid in ids:
+        fail = 0
+
+        # приоритет медиа: видео -> фото -> текст
+        for i, uid in enumerate(ids, start=1):
             try:
-                if photo_id:
+                if video_id:
+                    await bot.send_video(uid, video=video_id, caption=text)
+                elif photo_id:
                     await bot.send_photo(uid, photo=photo_id, caption=text)
                 else:
                     await bot.send_message(uid, text)
                 ok += 1
-                await asyncio.sleep(0.05)
             except Exception:
-                pass
+                fail += 1
 
-        await c.answer(f"Отправлено: {ok}", show_alert=True)
-        await adm_bc(c)
+            if i % 25 == 0 or i == total:
+                try:
+                    await progress_msg.edit_text(f"Рассылка: {i}/{total}\nУспешно: {ok} | Ошибок: {fail}")
+                except Exception:
+                    pass
+            await asyncio.sleep(0.03)  # лёгкий троттлинг
 
-    # ---- Stats
-    @router.callback_query(F.data == "adm:stats")
-    async def adm_stats(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        async with SessionLocal() as s:
-            total = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tenant_id))).scalar() or 0
-            regs = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.is_registered == True))).scalar() or 0
-            deps = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.has_deposit == True))).scalar() or 0
-            plats = (await s.execute(select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.is_platinum == True))).scalar() or 0
-        txt = f"📊 Статистика\n\nВсего: {total}\nРегистраций: {regs}\nДепозитов: {deps}\nPlatinum: {plats}"
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", txt, kb_admin_main())
+        try:
+            await progress_msg.edit_text(f"Готово ✅\nОтправлено: {ok} | Ошибок: {fail}")
+        except Exception:
+            pass
+
+        await state.clear()
         await c.answer()
 
-    return router
-
-
-# =========================
-#          Runner
-# =========================
-async def run_child_bot(token: str, tenant_id: int):
-    bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(make_child_router(tenant_id))
-    await dp.start_polling(bot)
+    @router.callback_query(F.data == "adm:bc:cancel")
+    async def adm_bc_cancel(c: CallbackQuery, state: FSMContext):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        await state.clear()
+        await c.message.answer("Окей, отменил.")
+        await c.answer()
