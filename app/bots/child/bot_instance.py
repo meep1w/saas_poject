@@ -7,6 +7,8 @@ from typing import Dict, Tuple, Optional, List
 import asyncio
 import hashlib
 import hmac
+import json
+import re
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -410,9 +412,12 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
         return t(lang, "gate_sub_title")
     if screen == "admin":
         return "Панель администратора"
+    if screen == "lang":
+        return t(lang, "lang_title")
     return screen
 
 async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    # для совместимости со старым подходом (главная большая кнопка)
     async with SessionLocal() as s:
         r = await s.execute(
             select(ContentOverride)
@@ -452,6 +457,52 @@ async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]
             return _pick_override_image_value(ov)
     return None
 
+def _render_template(src: str, ctx: dict) -> str:
+    # простая подстановка {{var}}
+    def repl(m):
+        key = m.group(1).strip()
+        return str(ctx.get(key, m.group(0)))
+    return re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, src or "")
+
+async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride)
+            .where(ContentOverride.tenant_id == tenant_id,
+                   ContentOverride.lang == lang,
+                   ContentOverride.screen == screen)
+        )
+        ov = r.scalar_one_or_none()
+        if ov and getattr(ov, "body_html", None):
+            return ov.body_html
+    return None
+
+async def resolve_buttons(tenant_id: int, lang: str, screen: str) -> dict:
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride)
+            .where(ContentOverride.tenant_id == tenant_id,
+                   ContentOverride.lang == lang,
+                   ContentOverride.screen == screen)
+        )
+        ov = r.scalar_one_or_none()
+        if ov:
+            raw = getattr(ov, "buttons_json", None)
+            if raw:
+                if isinstance(raw, dict):
+                    return raw
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return {}
+    return {}
+
+def button_text(buttons: dict, key: str, default: str) -> str:
+    val = buttons.get(key)
+    if isinstance(val, str) and val.strip():
+        return val
+    return default
+
 def _filter_allowed_columns(table, vals: dict) -> dict:
     cols = {c.name for c in table.columns}
     return {k: v for k, v in vals.items() if k in cols}
@@ -467,6 +518,9 @@ async def upsert_override(
     image: Optional[str] = None,
     photo_id: Optional[str] = None,
     photo_file_id: Optional[str] = None,
+    # новые поля для полного редактирования экрана
+    body_html: Optional[str] = None,
+    buttons_json: Optional[dict | str] = None,
     reset: bool = False,
 ):
     async with SessionLocal() as s:
@@ -489,7 +543,15 @@ async def upsert_override(
             raw_vals["title"] = title
         if primary_btn_text is not None:
             raw_vals["primary_btn_text"] = primary_btn_text
-        # сразу кладём одно и то же значение во все «возможные» поля
+        if body_html is not None:
+            raw_vals["body_html"] = body_html
+        if buttons_json is not None:
+            if isinstance(buttons_json, str):
+                raw_vals["buttons_json"] = buttons_json
+            else:
+                raw_vals["buttons_json"] = json.dumps(buttons_json, ensure_ascii=False)
+
+        # сразу кладём одно и то же значение во все «возможные» поля картинки
         for k, v in {
             "image_path": image_path,
             "image": image or image_path,
@@ -558,68 +620,75 @@ async def user_deposit_sum(tid: int, click_id: str) -> float:
 # =========================
 #         Keyboards
 # =========================
-def kb_subscribe(lang: str, ch_url: Optional[str]) -> InlineKeyboardMarkup:
+def kb_subscribe(lang: str, ch_url: Optional[str], labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     url = ch_url or settings.CHANNEL_URL
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_subscribe"), url=url)],
-            [InlineKeyboardButton(text=t(lang, "btn_check"), callback_data="check_sub")],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("subscribe", t(lang, "btn_subscribe")), url=url)],
+            [InlineKeyboardButton(text=labels.get("check", t(lang, "btn_check")), callback_data="check_sub")],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
-def kb_register(lang: str, url: str) -> InlineKeyboardMarkup:
+def kb_register(lang: str, url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_register"), url=url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("register", t(lang, "btn_register")), url=url)],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
-def kb_deposit(lang: str, url: str) -> InlineKeyboardMarkup:
+def kb_deposit(lang: str, url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_deposit"), url=url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("deposit", t(lang, "btn_deposit")), url=url)],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
-def kb_open_app(lang: str, support_url: str) -> InlineKeyboardMarkup:
+def kb_open_app(lang: str, support_url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_open_app"), web_app=WebAppInfo(url=settings.MINIAPP_URL))],
-            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("open_app", t(lang, "btn_open_app")), web_app=WebAppInfo(url=settings.MINIAPP_URL))],
+            [InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url)],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
-def kb_open_platinum(lang: str, support_url: str) -> InlineKeyboardMarkup:
+def kb_open_platinum(lang: str, support_url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_open_vip"), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))],
-            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))],
+            [InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url)],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
-def main_kb(lang: str, acc: UserAccess, support_url: str, menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
+def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict] = None, menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     direct = acc.has_deposit or acc.is_platinum
-    signal_text = menu_btn_text or t(lang, "btn_signal")
+    signal_text = menu_btn_text or labels.get("signal", t(lang, "btn_signal"))
 
     rows: list[list[InlineKeyboardButton]] = []
-    rows.append([InlineKeyboardButton(text=t(lang, "btn_howto"), callback_data="howto")])
+    rows.append([InlineKeyboardButton(text=labels.get("howto", t(lang, "btn_howto")), callback_data="howto")])
     rows.append([
-        InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url),
-        InlineKeyboardButton(text=t(lang, "btn_lang"), callback_data="lang"),
+        InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url),
+        InlineKeyboardButton(text=labels.get("lang", t(lang, "btn_lang")), callback_data="lang"),
     ])
     if acc.is_platinum:
         rows.append([
-            InlineKeyboardButton(text=t(lang, "btn_open_vip"), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))
+            InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))
         ])
     else:
         if direct:
             rows.append([
-                InlineKeyboardButton(text=signal_text, web_app=WebAppInfo(url=settings.MINIAPP_URL))
+                InlineKeyboardButton(text=labels.get("open_app", signal_text),
+                                     web_app=WebAppInfo(url=settings.MINIAPP_URL))
             ])
         else:
             rows.append([InlineKeyboardButton(text=signal_text, callback_data="signal")])
@@ -639,6 +708,7 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t(current, "back"), callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+# Доп: компактная клавиатура howto (сохранена для совместимости; сейчас не используется)
 def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -647,20 +717,49 @@ def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
         ]
     )
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# ГЛОБАЛЬНАЯ клавиатура редактора контента (чтобы show_content_editor её видел)
-def kb_content_editor(lang: str, screen: str, snapshot: dict) -> InlineKeyboardMarkup:
+# =========================
+#   Admin content keyboards (GLOBAL, чтобы не было NameError)
+# =========================
+def kb_content_langs() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="Русский", callback_data="adm:content:lang:ru"),
+         InlineKeyboardButton(text="English", callback_data="adm:content:lang:en")],
+        [InlineKeyboardButton(text="हिन्दी", callback_data="adm:content:lang:hi"),
+         InlineKeyboardButton(text="Español", callback_data="adm:content:lang:es")],
+        [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_content_screens(lang: str) -> InlineKeyboardMarkup:
+    screens = [
+        ("menu", "Главное меню"),
+        ("howto", "Инструкция"),
+        ("subscribe", "Подписка"),
+        ("register", "Регистрация"),
+        ("deposit", "Депозит"),
+        ("unlocked", "Доступ открыт"),
+        ("platinum", "Platinum"),
+        ("lang", "Выбор языка"),
+        ("admin", "Экран админки"),
+    ]
+    rows = [[InlineKeyboardButton(text=title, callback_data=f"adm:content:edit:{lang}:{code}")]
+            for code, title in screens]
+    rows.append([InlineKeyboardButton(text="↩️ Языки", callback_data="adm:content")])
+    rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
         [InlineKeyboardButton(text="✏️ Изменить заголовок", callback_data=f"adm:content:title:{lang}:{screen}")],
-        [InlineKeyboardButton(text="⌨️ Изменить текст кнопки", callback_data=f"adm:content:btn:{lang}:{screen}")],
+        [InlineKeyboardButton(text="📝 Изменить текст экрана", callback_data=f"adm:content:body:{lang}:{screen}")],
+        [InlineKeyboardButton(text="🔤 Изменить тексты кнопок", callback_data=f"adm:content:btns:{lang}:{screen}")],
         [InlineKeyboardButton(text="♻️ Сбросить к дефолту", callback_data=f"adm:content:reset:{lang}:{screen}")],
         [InlineKeyboardButton(text="📋 Список экранов", callback_data=f"adm:content:list:{lang}")],
         [InlineKeyboardButton(text="🌐 Языки", callback_data="adm:content")],
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # =========================
 #        Signal flow
@@ -710,8 +809,12 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
     # 1) Подписка (если включена)
     if tenant.check_subscription:
         if not await check_membership(bot, tenant.gate_channel_id, user_id):
-            text = f"<b>{t(lang, 'gate_sub_title')}</b>\n\n{t(lang, 'gate_sub_text')}"
-            await send_screen(bot, tenant_id, chat_id, lang, "subscribe", text, kb_subscribe(lang, tenant.gate_channel_url))
+            title = await resolve_title(tenant_id, lang, "subscribe")
+            body = await resolve_body(tenant_id, lang, "subscribe")
+            default = t(lang, 'gate_sub_text')
+            text = f"<b>{title}</b>\n\n{body or default}"
+            btns = await resolve_buttons(tenant_id, lang, "subscribe")
+            await send_screen(bot, tenant_id, chat_id, lang, "subscribe", text, kb_subscribe(lang, tenant.gate_channel_url, btns))
             asyncio.create_task(_auto_check_after_subscribe(bot, tenant_id, user_id, chat_id, lang))
             return
 
@@ -720,8 +823,12 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
     cid = await ensure_click_id(tenant_id, user_id)
     ref_url = add_params(ref, click_id=cid, tid=tenant_id)
     if not access.is_registered:
-        text = f"<b>{t(lang, 'gate_reg_title')}</b>\n\n{t(lang, 'gate_reg_text')}"
-        await send_screen(bot, tenant_id, chat_id, lang, "register", text, kb_register(lang, ref_url))
+        title = await resolve_title(tenant_id, lang, "register")
+        body = await resolve_body(tenant_id, lang, "register")
+        default = t(lang, 'gate_reg_text')
+        text = f"<b>{title}</b>\n\n{body or default}"
+        btns = await resolve_buttons(tenant_id, lang, "register")
+        await send_screen(bot, tenant_id, chat_id, lang, "register", text, kb_register(lang, ref_url, btns))
         return
 
     # 3) Депозит
@@ -738,36 +845,42 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
 
             remain = max(need - total, 0.0)
 
-            hints = {
-                "ru": (
-                    f"\n\n<b>Минимальный депозит:</b> {fmt(need)}$"
-                    f"\n<b>Внесено:</b> {fmt(total)}$"
-                    f"\n<b>Осталось внести:</b> {fmt(remain)}$"
-                ),
-                "en": (
-                    f"\n\n<b>Minimum deposit:</b> {fmt(need)}$"
-                    f"\n<b>Deposited:</b> {fmt(total)}$"
-                    f"\n<b>Left to deposit:</b> {fmt(remain)}$"
-                ),
-                "hi": (
-                    f"\n\n<b>न्यूनतम जमा:</b> {fmt(need)}$"
-                    f"\n<b>जमा किया गया:</b> {fmt(total)}$"
-                    f"\n<b>बाकी जमा करना:</b> {fmt(remain)}$"
-                ),
-                "es": (
-                    f"\n\n<b>Depósito mínimo:</b> {fmt(need)}$"
-                    f"\n<b>Depositado:</b> {fmt(total)}$"
-                    f"\n<b>Falta depositar:</b> {fmt(remain)}$"
-                ),
-            }
-            hint = hints.get(lang, hints["en"])
+            title = await resolve_title(tenant_id, lang, "deposit")
+            body = await resolve_body(tenant_id, lang, "deposit")
+            default = t(lang, 'gate_dep_text')
 
-            text = (
-                f"<b>{t(lang, 'gate_dep_title')}</b>\n\n"
-                f"{t(lang, 'gate_dep_text')}{hint}"
-            )
+            # если есть кастом-тело — поддержим {{need}}, {{total}}, {{remain}}
+            ctx = {"need": fmt(need), "total": fmt(total), "remain": fmt(remain)}
+            if body:
+                body_text = _render_template(body, ctx)
+            else:
+                hints = {
+                    "ru": (
+                        f"\n\n<b>Минимальный депозит:</b> {fmt(need)}$"
+                        f"\n<b>Внесено:</b> {fmt(total)}$"
+                        f"\n<b>Осталось внести:</b> {fmt(remain)}$"
+                    ),
+                    "en": (
+                        f"\n\n<b>Minimum deposit:</b> {fmt(need)}$"
+                        f"\n<b>Deposited:</b> {fmt(total)}$"
+                        f"\n<b>Left to deposit:</b> {fmt(remain)}$"
+                    ),
+                    "hi": (
+                        f"\n\n<b>न्यूनतम जमा:</b> {fmt(need)}$"
+                        f"\n<b>जमा किया गया:</b> {fmt(total)}$"
+                        f"\n<b>बाकी जमा करना:</b> {fmt(remain)}$"
+                    ),
+                    "es": (
+                        f"\n\n<b>Depósito mínimo:</b> {fmt(need)}$"
+                        f"\n<b>Depositado:</b> {fmt(total)}$"
+                        f"\n<b>Falta depositar:</b> {fmt(remain)}$"
+                    ),
+                }
+                body_text = default + hints.get(lang, "")
 
-            await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
+            text = f"<b>{title}</b>\n\n{body_text}"
+            btns = await resolve_buttons(tenant_id, lang, "deposit")
+            await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url, btns))
             return
 
     # авто-Platinum
@@ -789,24 +902,35 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
 
     # Platinum уведомление
     if access.is_platinum and not access.platinum_shown:
-        text = f"<b>{t(lang, 'platinum_title')}</b>\n\n{t(lang, 'platinum_text')}"
-        await send_screen(bot, tenant_id, chat_id, lang, "platinum", text, kb_open_platinum(lang, support_url))
+        title = await resolve_title(tenant_id, lang, "platinum")
+        body = await resolve_body(tenant_id, lang, "platinum")
+        default = t(lang, 'platinum_text')
+        text = f"<b>{title}</b>\n\n{body or default}"
+        btns = await resolve_buttons(tenant_id, lang, "platinum")
+        await send_screen(bot, tenant_id, chat_id, lang, "platinum", text, kb_open_platinum(lang, support_url, btns))
         await mark_platinum_shown(tenant_id, user_id)
         return
 
     # “Доступ открыт”
     if not access.unlocked_shown:
-        text = f"<b>{t(lang, 'unlocked_title')}</b>\n\n{t(lang, 'unlocked_text')}"
-        await send_screen(bot, tenant_id, chat_id, lang, "unlocked", text, kb_open_app(lang, support_url))
+        title = await resolve_title(tenant_id, lang, "unlocked")
+        body = await resolve_body(tenant_id, lang, "unlocked")
+        default = t(lang, 'unlocked_text')
+        text = f"<b>{title}</b>\n\n{body or default}"
+        btns = await resolve_buttons(tenant_id, lang, "unlocked")
+        await send_screen(bot, tenant_id, chat_id, lang, "unlocked", text, kb_open_app(lang, support_url, btns))
         await mark_unlocked_shown(tenant_id, user_id)
         return
 
     # Меню
     title = await resolve_title(tenant_id, lang, "menu")
-    btn_text = await resolve_primary_btn_text(tenant_id, lang, "menu")
+    body = await resolve_body(tenant_id, lang, "menu")
+    btn_labels = await resolve_buttons(tenant_id, lang, "menu")
+    menu_btn_text = await resolve_primary_btn_text(tenant_id, lang, "menu")
+    text = f"<b>{title}</b>" + (f"\n\n{body}" if body else "")
     await send_screen(
-        bot, tenant_id, chat_id, lang, "menu", title,
-        main_kb(lang, access, support_url, btn_text)
+        bot, tenant_id, chat_id, lang, "menu", text,
+        main_kb(lang, access, support_url, btn_labels, menu_btn_text)
     )
 
 # =========================
@@ -917,8 +1041,17 @@ async def show_content_editor(bot: Bot, tenant_id: int, chat_id: int, lang: str,
     title = await resolve_title(tenant_id, lang, screen)
     btn_tx = await resolve_primary_btn_text(tenant_id, lang, screen) or "—"
     img = await resolve_image(tenant_id, lang, screen)
-    text = f"🧩 Редактор — {screen} ({lang.upper()})\n\nЗаголовок: <b>{title}</b>\nТекст кнопки: <code>{btn_tx}</code>\nКартинка: {'кастом' if img else 'дефолт'}"
-    await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_content_editor(lang, screen, {}))
+    body = await resolve_body(tenant_id, lang, screen)
+    btns = await resolve_buttons(tenant_id, lang, screen)
+    text = (
+        f"🧩 Редактор — {screen} ({lang.upper()})\n\n"
+        f"Заголовок: <b>{title}</b>\n"
+        f"Текст экрана: {'кастом' if body else 'дефолт'}\n"
+        f"Кнопки: {('кастом ' + str(len(btns))) if btns else 'дефолт'}\n"
+        f"Главная кнопка (legacy): <code>{btn_tx}</code>\n"
+        f"Картинка: {'кастом' if img else 'дефолт'}"
+    )
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_content_editor(lang, screen))
 
 async def send_users_page(bot: Bot, tenant_id: int, chat_id: int, page: int):
     items, more, total = await _fetch_users_page(tenant_id, page)
@@ -974,9 +1107,12 @@ def make_child_router(tenant_id: int) -> Router:
         sup = tnt.support_url or settings.SUPPORT_URL
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
         title = await resolve_title(tenant_id, lang, "menu")
+        body = await resolve_body(tenant_id, lang, "menu")
+        btn_labels = await resolve_buttons(tenant_id, lang, "menu")
+        text = f"<b>{title}</b>" + (f"\n\n{body}" if body else "")
         await send_screen(
-            m.bot, tenant_id, m.chat.id, lang, "menu", title,
-            main_kb(lang, acc, sup, menu_btn)
+            m.bot, tenant_id, m.chat.id, lang, "menu", text,
+            main_kb(lang, acc, sup, btn_labels, menu_btn)
         )
 
     @router.message(Command("my_click"))
@@ -992,9 +1128,12 @@ def make_child_router(tenant_id: int) -> Router:
         sup = tnt.support_url or settings.SUPPORT_URL
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
         title = await resolve_title(tenant_id, lang, "menu")
+        body = await resolve_body(tenant_id, lang, "menu")
+        btn_labels = await resolve_buttons(tenant_id, lang, "menu")
+        text = f"<b>{title}</b>" + (f"\n\n{body}" if body else "")
         await send_screen(
-            c.bot, tenant_id, c.message.chat.id, lang, "menu", title,
-            main_kb(lang, acc, sup, menu_btn)
+            c.bot, tenant_id, c.message.chat.id, lang, "menu", text,
+            main_kb(lang, acc, sup, btn_labels, menu_btn)
         )
         await c.answer()
 
@@ -1005,9 +1144,15 @@ def make_child_router(tenant_id: int) -> Router:
         sup = tnt.support_url or settings.SUPPORT_URL
 
         ref = tnt.ref_link or settings.REF_LINK
-        text = build_howto_text(lang, ref)
+        title = await resolve_title(tenant_id, lang, "howto")
+        body_override = await resolve_body(tenant_id, lang, "howto")
+        body_default = build_howto_text(lang, ref)
+        body = (body_override or body_default)
+        body = _render_template(body, {"ref": _render_ref_anchor(ref)})
+        buttons = await resolve_buttons(tenant_id, lang, "howto")
 
-        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_howto_min(lang, sup))
+        text = f"<b>{title}</b>\n\n{body}"
+        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_open_app(lang, sup, buttons))
         await c.answer()
 
     @router.callback_query(F.data == "signal")
@@ -1025,7 +1170,10 @@ def make_child_router(tenant_id: int) -> Router:
     @router.callback_query(F.data == "lang")
     async def cb_lang(c: CallbackQuery):
         lang = await get_lang(tenant_id, c.from_user.id)
-        text = f"<b>{t(lang, 'lang_title')}</b>\n\n{t(lang, 'lang_text')}"
+        title = await resolve_title(tenant_id, lang, "lang")
+        body = await resolve_body(tenant_id, lang, "lang")
+        default = t(lang, 'lang_text')
+        text = f"<b>{title}</b>\n\n{body or default}"
         await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "lang", text, build_lang_kb(lang))
         await c.answer()
 
@@ -1040,10 +1188,13 @@ def make_child_router(tenant_id: int) -> Router:
         tnt = await get_tenant(tenant_id)
         sup = tnt.support_url or settings.SUPPORT_URL
         title = await resolve_title(tenant_id, new_lang, "menu")
+        body = await resolve_body(tenant_id, new_lang, "menu")
+        btn_labels = await resolve_buttons(tenant_id, new_lang, "menu")
         menu_btn = await resolve_primary_btn_text(tenant_id, new_lang, "menu")
+        text = f"<b>{title}</b>" + (f"\n\n{body}" if body else "")
         await send_screen(
-            c.bot, tenant_id, c.message.chat.id, new_lang, "menu", title,
-            main_kb(new_lang, acc, sup, menu_btn)
+            c.bot, tenant_id, c.message.chat.id, new_lang, "menu", text,
+            main_kb(new_lang, acc, sup, btn_labels, menu_btn)
         )
         await c.answer()
 
@@ -1119,7 +1270,6 @@ def make_child_router(tenant_id: int) -> Router:
                     or_(
                         UserAccess.trader_id.ilike(f"%{q}%"),
                         UserAccess.click_id.ilike(f"%{q}%"),
-                        UserAccess.username.ilike(f"%{q}%"),
                     )
                 ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
             )
@@ -1344,7 +1494,6 @@ def make_child_router(tenant_id: int) -> Router:
             query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
 
-            import re
             m_id = re.search(r"-?\d{5,}", query_raw)
             like = f"%{query_raw}%"
 
@@ -1380,12 +1529,37 @@ def make_child_router(tenant_id: int) -> Router:
             await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
             return
 
-        # контент: текст кнопки
+        # контент: текст основной кнопки (legacy)
         if wait.startswith("content_btn:"):
             _, lang, screen = wait.split(":")
             await upsert_override(tenant_id, lang, screen, primary_btn_text=m.text.strip())
             ADMIN_WAIT.pop(key, None)
             await m.answer("Текст кнопки сохранён ✅")
+            await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
+            return
+
+        # контент: ПОЛНЫЙ ТЕКСТ (HTML)
+        if wait.startswith("content_body:"):
+            _, lang, screen = wait.split(":")
+            await upsert_override(tenant_id, lang, screen, body_html=m.text)
+            ADMIN_WAIT.pop(key, None)
+            await m.answer("Текст экрана сохранён ✅")
+            await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
+            return
+
+        # контент: JSON кнопок
+        if wait.startswith("content_btns:"):
+            _, lang, screen = wait.split(":")
+            try:
+                data = json.loads(m.text)
+                if not isinstance(data, dict):
+                    raise ValueError
+            except Exception:
+                await m.answer("Нужен корректный JSON-объект с парами ключ:текст.")
+                return
+            await upsert_override(tenant_id, lang, screen, buttons_json=data)
+            ADMIN_WAIT.pop(key, None)
+            await m.answer("Тексты кнопок сохранены ✅")
             await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
             return
 
@@ -1418,34 +1592,7 @@ def make_child_router(tenant_id: int) -> Router:
             await m.answer("PB Secret сохранён.")
             await show_links_screen(m.bot, tenant_id, m.chat.id)
 
-    # ---- Content editor
-    def kb_content_langs() -> InlineKeyboardMarkup:
-        rows = [
-            [InlineKeyboardButton(text="Русский", callback_data="adm:content:lang:ru"),
-             InlineKeyboardButton(text="English", callback_data="adm:content:lang:en")],
-            [InlineKeyboardButton(text="हिन्दी", callback_data="adm:content:lang:hi"),
-             InlineKeyboardButton(text="Español", callback_data="adm:content:lang:es")],
-            [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def kb_content_screens(lang: str) -> InlineKeyboardMarkup:
-        screens = [
-            ("menu", "Главное меню"),
-            ("howto", "Инструкция"),
-            ("subscribe", "Подписка"),
-            ("register", "Регистрация"),
-            ("deposit", "Депозит"),
-            ("unlocked", "Доступ открыт"),
-            ("platinum", "Platinum"),
-            ("admin", "Экран админки"),
-        ]
-        rows = [[InlineKeyboardButton(text=title, callback_data=f"adm:content:edit:{lang}:{code}")]
-                for code, title in screens]
-        rows.append([InlineKeyboardButton(text="↩️ Языки", callback_data="adm:content")])
-        rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
+    # ---- Content editor callbacks (используют GLOBAL клавиатуры)
     @router.callback_query(F.data == "adm:content")
     async def adm_content(c: CallbackQuery):
         if not await is_owner(tenant_id, c.from_user.id):
@@ -1493,6 +1640,32 @@ def make_child_router(tenant_id: int) -> Router:
         _, _, _, lang, screen = c.data.split(":")
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_btn:{lang}:{screen}"
         await c.message.answer("Пришлите новый текст основной кнопки одним сообщением.")
+        await c.answer()
+
+    @router.callback_query(F.data.startswith("adm:content:btns:"))
+    async def adm_content_btns(c: CallbackQuery):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        _, _, _, lang, screen = c.data.split(":")
+        keys_map = {
+            "menu": ["howto","support","lang","open_app","open_vip","signal"],
+            "subscribe": ["subscribe","check","back"],
+            "register": ["register","back"],
+            "deposit": ["deposit","back"],
+            "howto": ["open_app","support","back"],
+            "unlocked": ["open_app","support","back"],
+            "platinum": ["open_vip","support","back"],
+            "lang": ["back"],
+            "admin": ["back"],
+        }
+        keys = ", ".join(keys_map.get(screen, []))
+        ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_btns:{lang}:{screen}"
+        await c.message.answer(
+            f"Пришлите JSON c подписями кнопок для экрана <b>{screen}</b>.\n"
+            f"Например:\n<code>{{\"back\":\"Назад\",\"support\":\"Помощь\"}}</code>\n"
+            f"Доступные ключи: <code>{keys}</code>",
+            parse_mode="HTML"
+        )
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:img:"))

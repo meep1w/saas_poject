@@ -12,7 +12,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
-
+from sqlalchemy.types import JSON as SA_JSON
+from sqlalchemy.ext.mutable import MutableDict
 
 class Tenant(Base):
     __tablename__ = "tenants"
@@ -125,3 +126,7 @@ class ContentOverride(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    buttons_json: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(SA_JSON), nullable=True
+    )
