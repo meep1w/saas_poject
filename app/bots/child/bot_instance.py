@@ -416,6 +416,21 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
         return t(lang, "lang_title")
     return screen
 
+async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride).where(
+                ContentOverride.tenant_id == tenant_id,
+                ContentOverride.lang == lang,
+                ContentOverride.screen == screen,
+            )
+        )
+        ov = r.scalar_one_or_none()
+        if ov and getattr(ov, "body_html", None):
+            return ov.body_html
+    return None
+
+
 async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
     # для совместимости со старым подходом (главная большая кнопка)
     async with SessionLocal() as s:
@@ -575,15 +590,7 @@ async def upsert_override(
         await s.commit()
 
 # -------- common send --------
-async def send_screen(
-    bot: Bot,
-    tenant_id: int,
-    chat_id: int,
-    lang: str,
-    screen: str,
-    text: str,
-    kb: Optional[InlineKeyboardMarkup],
-):
+async def send_screen(...):
     last_id = await get_last_bot_message_id(tenant_id, chat_id)
     if last_id:
         try:
@@ -596,16 +603,22 @@ async def send_screen(
     if custom:
         p = Path(custom)
         photo = FSInputFile(str(p)) if p.exists() else custom
-    if photo:
-        msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
-    else:
-        p = asset_for(lang, screen)
-        if p and p.exists():
-            msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
+
+    try:
+        if photo:
+            msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
         else:
-            msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+            p = asset_for(lang, screen)
+            if p and p.exists():
+                msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
+            else:
+                msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+    except TelegramBadRequest as e:
+        # Фоллбек на обычное сообщение (слишком длинный caption и т.п.)
+        msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
     await set_last_bot_message_id(tenant_id, chat_id, msg.message_id)
+
 
 # -------- metrics --------
 async def user_deposit_sum(tid: int, click_id: str) -> float:
@@ -752,14 +765,15 @@ def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
         [InlineKeyboardButton(text="✏️ Изменить заголовок", callback_data=f"adm:content:title:{lang}:{screen}")],
-        [InlineKeyboardButton(text="📝 Изменить текст экрана", callback_data=f"adm:content:body:{lang}:{screen}")],
-        [InlineKeyboardButton(text="🔤 Изменить тексты кнопок", callback_data=f"adm:content:btns:{lang}:{screen}")],
+        [InlineKeyboardButton(text="📝 Изменить текст экрана", callback_data=f"adm:content:body:{lang}:{screen}")],  # <-- НОВОЕ
+        [InlineKeyboardButton(text="⌨️ Изменить текст кнопки", callback_data=f"adm:content:btn:{lang}:{screen}")],
         [InlineKeyboardButton(text="♻️ Сбросить к дефолту", callback_data=f"adm:content:reset:{lang}:{screen}")],
         [InlineKeyboardButton(text="📋 Список экранов", callback_data=f"adm:content:list:{lang}")],
         [InlineKeyboardButton(text="🌐 Языки", callback_data="adm:content")],
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 # =========================
 #        Signal flow
@@ -1640,6 +1654,15 @@ def make_child_router(tenant_id: int) -> Router:
         _, _, _, lang, screen = c.data.split(":")
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_btn:{lang}:{screen}"
         await c.message.answer("Пришлите новый текст основной кнопки одним сообщением.")
+        await c.answer()
+
+    @router.callback_query(F.data.startswith("adm:content:body:"))
+    async def adm_content_body(c: CallbackQuery):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        _, _, _, lang, screen = c.data.split(":")
+        ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_body:{lang}:{screen}"
+        await c.message.answer("Пришлите новый ТЕКСТ ЭКРАНА одним сообщением (HTML разрешён).")
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:btns:"))
