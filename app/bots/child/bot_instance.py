@@ -1284,34 +1284,47 @@ def make_child_router(tenant_id: int) -> Router:
         return items, more, total
 
     async def _search_users(bot: Bot, tid: int, q: str) -> List[UserAccess]:
-        q = q.strip()
+        q = (q or "").strip()
         async with SessionLocal() as s:
-            if q.isdigit():
+            # 1) @username → ищем в БД по колонке username
+            if q.startswith("@"):
+                u = q[1:].lower()
                 res = await s.execute(
-                    select(UserAccess).where(UserAccess.tenant_id == tid, UserAccess.user_id == int(q))
+                    select(UserAccess).where(
+                        UserAccess.tenant_id == tid,
+                        or_(
+                            UserAccess.username.ilike(u),  # точное
+                            UserAccess.username.ilike(f"%{u}%"),  # частичное
+                        )
+                    ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
                 )
                 return res.scalars().all()
 
-            if q.startswith("@"):
+            # 2) только цифры → ищем ВЕЗДЕ: TG ID, trader_id, click_id
+            if q.isdigit():
                 res = await s.execute(
-                    select(UserAccess).where(UserAccess.tenant_id == tid).order_by(UserAccess.id.desc()).limit(200)
+                    select(UserAccess).where(
+                        UserAccess.tenant_id == tid,
+                        or_(
+                            UserAccess.user_id == int(q),
+                            cast(UserAccess.user_id, String).ilike(f"%{q}%"),
+                            UserAccess.trader_id == q,
+                            UserAccess.trader_id.ilike(f"%{q}%"),
+                            UserAccess.click_id.ilike(f"%{q}%"),
+                        )
+                    ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
                 )
-                found = []
-                for ua in res.scalars().all():
-                    try:
-                        ch = await bot.get_chat(ua.user_id)
-                        if ch.username and f"@{ch.username.lower()}" == q.lower():
-                            found.append(ua)
-                    except Exception:
-                        pass
-                return found
+                return res.scalars().all()
 
+            # 3) общий текст → trader_id / click_id / username (частичное)
+            u = q.lstrip("@")
             res = await s.execute(
                 select(UserAccess).where(
                     UserAccess.tenant_id == tid,
                     or_(
                         UserAccess.trader_id.ilike(f"%{q}%"),
                         UserAccess.click_id.ilike(f"%{q}%"),
+                        UserAccess.username.ilike(f"%{u}%"),
                     )
                 ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
             )
