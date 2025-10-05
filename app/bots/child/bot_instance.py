@@ -962,6 +962,24 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
 ADMIN_WAIT: Dict[Tuple[int, int], str] = {}
 PAGE_SIZE = 8
 
+# === GLOBAL: выдача страницы пользователей ===
+async def fetch_users_page(tid: int, page: int):
+    async with SessionLocal() as s:
+        total = (await s.execute(
+            select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tid)
+        )).scalar() or 0
+        res = await s.execute(
+            select(UserAccess)
+            .where(UserAccess.tenant_id == tid)
+            .order_by(UserAccess.id.desc())
+            .offset(page * PAGE_SIZE)
+            .limit(PAGE_SIZE)
+        )
+        items = res.scalars().all()
+    more = (page + 1) * PAGE_SIZE < total
+    return items, more, total
+
+
 def kb_admin_main() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="👤 Пользователи", callback_data="adm:users:0")],
@@ -1077,9 +1095,10 @@ async def show_content_editor(bot: Bot, tenant_id: int, chat_id: int, lang: str,
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_content_editor(lang, screen))
 
 async def send_users_page(bot: Bot, tenant_id: int, chat_id: int, page: int):
-    items, more, total = await _fetch_users_page(tenant_id, page)
-    txt = f"👤 Пользователи ({total or 0})\n\nВыберите пользователя:"
+    items, more, total = await fetch_users_page(tenant_id, page)
+    txt = f"👤 Пользователи ({total})\n\nВыберите пользователя:"
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", txt, kb_users_list(items, page, more))
+
 
 async def send_user_card(bot: Bot, tenant_id: int, chat_id: int, uid: int):
     async with SessionLocal() as s:
@@ -1514,33 +1533,71 @@ def make_child_router(tenant_id: int) -> Router:
 
         # поиск пользователей
         if wait == "users_search":
-            query_raw = m.text.strip()
+            q = m.text.strip()
             ADMIN_WAIT.pop(key, None)
 
-            m_id = re.search(r"-?\d{5,}", query_raw)
-            like = f"%{query_raw}%"
-
             async with SessionLocal() as s:
-                conds = []
-                if m_id:
-                    tg_id = int(m_id.group(0))
-                    conds.append(UserAccess.user_id == tg_id)
-                    conds.append(cast(UserAccess.user_id, String).like(f"%{tg_id}%"))
-                conds.append(UserAccess.trader_id.ilike(like))
-                conds.append(UserAccess.click_id.ilike(like))
-                conds.append(UserAccess.username.ilike(like))
+                found = []
 
-                res = await s.execute(
-                    select(UserAccess)
-                    .where(UserAccess.tenant_id == tenant_id, or_(*conds))
-                    .order_by(UserAccess.id.desc())
-                    .limit(50)
-                )
-                items = res.scalars().all()
+                # 1) точный TG ID (число)
+                if re.fullmatch(r"-?\d{5,}", q or ""):
+                    res = await s.execute(
+                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
+                                                 UserAccess.user_id == int(q))
+                    )
+                    found = res.scalars().all()
 
-            txt = f"🔎 Результаты поиска: {len(items)}"
-            kb = kb_users_list(items, page=0, more=False)
-            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
+                # 2) точный @username
+                if not found and q.startswith("@"):
+                    uname = q[1:].lower()
+                    res = await s.execute(
+                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
+                                                 func.lower(UserAccess.username) == uname)
+                    )
+                    found = res.scalars().all()
+
+                # 3) точный click_id
+                if not found:
+                    res = await s.execute(
+                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
+                                                 UserAccess.click_id == q)
+                    )
+                    found = res.scalars().all()
+
+                # 4) точный trader_id
+                if not found:
+                    res = await s.execute(
+                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
+                                                 UserAccess.trader_id == q)
+                    )
+                    found = res.scalars().all()
+
+                # 5) частичный поиск по нескольким полям
+                if not found:
+                    like = f"%{q}%"
+                    res = await s.execute(
+                        select(UserAccess).where(
+                            UserAccess.tenant_id == tenant_id,
+                            or_(
+                                UserAccess.trader_id.ilike(like),
+                                UserAccess.click_id.ilike(like),
+                                UserAccess.username.ilike(like),
+                                cast(UserAccess.user_id, String).ilike(like),
+                            )
+                        ).order_by(UserAccess.id.desc()).limit(50)
+                    )
+                    found = res.scalars().all()
+
+            if not found:
+                await m.answer("Ничего не найдено.")
+                return
+
+            if len(found) == 1:
+                await send_user_card(m.bot, tenant_id, m.chat.id, found[0].user_id)
+            else:
+                txt = f"🔎 Результаты поиска: {len(found)}"
+                kb = kb_users_list(found, page=0, more=False)
+                await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
         # контент: заголовок
