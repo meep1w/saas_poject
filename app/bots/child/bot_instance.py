@@ -164,6 +164,7 @@ ASSETS_DIR = Path("assets")
 def _render_ref_anchor(url: str) -> str:
     return f'<a href="{url}">PocketOption</a>'
 
+
 def build_howto_text(lang: str, ref_url: str) -> str:
     ref = _render_ref_anchor(ref_url)
 
@@ -232,9 +233,11 @@ def build_howto_text(lang: str, ref_url: str) -> str:
     txt = mapping.get(lang, EN)
     return txt.replace("{{ref}}", ref).replace("{{reff}}", ref)
 
+
 def t(lang: str, key: str) -> str:
     base = I18N.get(lang) or I18N["en"]
     return base.get(key) or I18N["en"].get(key, key)
+
 
 def asset_for(lang: str, screen: str) -> Optional[Path]:
     candidates = []
@@ -247,18 +250,22 @@ def asset_for(lang: str, screen: str) -> Optional[Path]:
             return p
     return None
 
+
 def add_params(url: str, **params) -> str:
     u = urlparse(url)
     q = dict(parse_qsl(u.query))
     q.update({k: str(v) for k, v in params.items() if v is not None})
     return urlunparse(u._replace(query=urlencode(q)))
 
+
 SALT = getattr(settings, "CLICK_SALT", "dev_salt_change_me")
+
 
 def make_click_id(tenant_id: int, user_id: int) -> str:
     raw = f"{tenant_id}:{user_id}".encode()
     digest = hmac.new(SALT.encode(), raw, hashlib.sha256).hexdigest()[:24]
     return f"{tenant_id}-{digest}"
+
 
 async def ensure_click_id(tenant_id: int, user_id: int) -> str:
     async with SessionLocal() as s:
@@ -280,6 +287,7 @@ async def ensure_click_id(tenant_id: int, user_id: int) -> str:
         await s.commit()
         return cid
 
+
 async def set_trader_id_for_click(tenant_id: int, click_id: str, trader_id: str):
     async with SessionLocal() as s:
         await s.execute(
@@ -289,6 +297,7 @@ async def set_trader_id_for_click(tenant_id: int, click_id: str, trader_id: str)
         )
         await s.commit()
 
+
 async def get_lang(tenant_id: int, user_id: int) -> str:
     async with SessionLocal() as s:
         res = await s.execute(
@@ -296,6 +305,7 @@ async def get_lang(tenant_id: int, user_id: int) -> str:
         )
         row = res.scalar_one_or_none()
         return row.lang if row else settings.LANG_DEFAULT
+
 
 async def set_lang(tenant_id: int, user_id: int, lang: str):
     async with SessionLocal() as s:
@@ -313,10 +323,12 @@ async def set_lang(tenant_id: int, user_id: int, lang: str):
             )
         await s.commit()
 
+
 async def get_tenant(tenant_id: int) -> Tenant:
     async with SessionLocal() as s:
         res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
         return res.scalar_one()
+
 
 async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
     async with SessionLocal() as s:
@@ -343,6 +355,7 @@ async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
             acc = res.scalar_one()
         return acc
 
+
 async def mark_unlocked_shown(tenant_id: int, user_id: int):
     async with SessionLocal() as s:
         await s.execute(
@@ -357,6 +370,7 @@ async def mark_unlocked_shown(tenant_id: int, user_id: int):
         )
         await s.commit()
 
+
 async def mark_platinum_shown(tenant_id: int, user_id: int):
     async with SessionLocal() as s:
         await s.execute(
@@ -365,6 +379,7 @@ async def mark_platinum_shown(tenant_id: int, user_id: int):
             .values(platinum_shown=True)
         )
         await s.commit()
+
 
 async def set_last_bot_message_id(tenant_id: int, chat_id: int, message_id: Optional[int]):
     async with SessionLocal() as s:
@@ -383,6 +398,7 @@ async def set_last_bot_message_id(tenant_id: int, chat_id: int, message_id: Opti
                 )
             )
         await s.commit()
+
 
 async def get_last_bot_message_id(tenant_id: int, chat_id: int) -> Optional[int]:
     async with SessionLocal() as s:
@@ -425,38 +441,6 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
         return t(lang, "lang_title")
     return screen
 
-async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
-    async with SessionLocal() as s:
-        r = await s.execute(
-            select(ContentOverride).where(
-                ContentOverride.tenant_id == tenant_id,
-                ContentOverride.lang == lang,
-                ContentOverride.screen == screen,
-            )
-        )
-        ov = r.scalar_one_or_none()
-        if ov and getattr(ov, "body_html", None):
-            return ov.body_html
-    return None
-
-
-async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
-    # для совместимости со старым подходом (главная большая кнопка)
-    async with SessionLocal() as s:
-        r = await s.execute(
-            select(ContentOverride)
-            .where(ContentOverride.tenant_id == tenant_id,
-                   ContentOverride.lang == lang,
-                   ContentOverride.screen == screen)
-        )
-        ov = r.scalar_one_or_none()
-        if ov and getattr(ov, "primary_btn_text", None):
-            return ov.primary_btn_text
-    if screen == "menu":
-        return t(lang, "btn_signal")
-    if screen == "howto":
-        return t(lang, "btn_open_app")
-    return None
 
 def _pick_override_image_value(ov: ContentOverride) -> Optional[str]:
     """
@@ -467,6 +451,7 @@ def _pick_override_image_value(ov: ContentOverride) -> Optional[str]:
         if val:
             return val
     return None
+
 
 async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]:
     async with SessionLocal() as s:
@@ -481,12 +466,14 @@ async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]
             return _pick_override_image_value(ov)
     return None
 
+
 def _render_template(src: str, ctx: dict) -> str:
     # простая подстановка {{var}}
     def repl(m):
         key = m.group(1).strip()
         return str(ctx.get(key, m.group(0)))
     return re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, src or "")
+
 
 async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
     async with SessionLocal() as s:
@@ -500,6 +487,7 @@ async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
         if ov and getattr(ov, "body_html", None):
             return ov.body_html
     return None
+
 
 async def resolve_buttons(tenant_id: int, lang: str, screen: str) -> dict:
     async with SessionLocal() as s:
@@ -521,15 +509,18 @@ async def resolve_buttons(tenant_id: int, lang: str, screen: str) -> dict:
                     return {}
     return {}
 
+
 def button_text(buttons: dict, key: str, default: str) -> str:
     val = buttons.get(key)
     if isinstance(val, str) and val.strip():
         return val
     return default
 
+
 def _filter_allowed_columns(table, vals: dict) -> dict:
     cols = {c.name for c in table.columns}
     return {k: v for k, v in vals.items() if k in cols}
+
 
 async def upsert_override(
     tenant_id: int,
@@ -630,7 +621,7 @@ async def send_screen(
                 msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
             else:
                 msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
-    except TelegramBadRequest as e:
+    except TelegramBadRequest:
         # Фоллбек на обычное сообщение (слишком длинный caption и т.п.)
         msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
@@ -660,6 +651,7 @@ def kb_subscribe(lang: str, ch_url: Optional[str], labels: Optional[dict] = None
         ]
     )
 
+
 def kb_register(lang: str, url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
     return InlineKeyboardMarkup(
@@ -669,6 +661,7 @@ def kb_register(lang: str, url: str, labels: Optional[dict] = None) -> InlineKey
         ]
     )
 
+
 def kb_deposit(lang: str, url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
     return InlineKeyboardMarkup(
@@ -677,6 +670,7 @@ def kb_deposit(lang: str, url: str, labels: Optional[dict] = None) -> InlineKeyb
             [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
+
 
 def kb_open_app(lang: str, support_url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
@@ -688,6 +682,7 @@ def kb_open_app(lang: str, support_url: str, labels: Optional[dict] = None) -> I
         ]
     )
 
+
 def kb_open_platinum(lang: str, support_url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
     return InlineKeyboardMarkup(
@@ -697,6 +692,7 @@ def kb_open_platinum(lang: str, support_url: str, labels: Optional[dict] = None)
             [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
+
 
 def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict] = None, menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
@@ -724,6 +720,7 @@ def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict]
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     row, rows = [], []
     for code in LANGS:
@@ -736,6 +733,7 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([InlineKeyboardButton(text=t(current, "back"), callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 # Доп: компактная клавиатура howto (сохранена для совместимости; сейчас не используется)
 def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
@@ -759,6 +757,7 @@ def kb_content_langs() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def kb_content_screens(lang: str) -> InlineKeyboardMarkup:
     screens = [
         ("menu", "Главное меню"),
@@ -777,6 +776,7 @@ def kb_content_screens(lang: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
@@ -791,8 +791,6 @@ def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-
 # =========================
 #        Signal flow
 # =========================
@@ -805,10 +803,12 @@ async def check_membership(bot: Bot, channel_id: Optional[int], user_id: int) ->
     except Exception:
         return False
 
+
 async def _auto_check_after_subscribe(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lang: str):
     await asyncio.sleep(12)
     if await check_membership(bot, (await get_tenant(tenant_id)).gate_channel_id, user_id):
         await route_signal(bot, tenant_id, user_id, chat_id, lang)
+
 
 async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lang: str):
     async with SessionLocal() as s:
@@ -988,6 +988,7 @@ async def fetch_users_page(tid: int, page: int):
     more = (page + 1) * PAGE_SIZE < total
     return items, more, total
 
+
 async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
     q = (q or "").strip()
     like = f"%{q}%"
@@ -1072,7 +1073,6 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
     return list(uniq.values())
 
 
-
 def kb_admin_main() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="👤 Пользователи", callback_data="adm:users:0")],
@@ -1084,6 +1084,7 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
     rows = []
@@ -1126,6 +1127,7 @@ def kb_user_card(ua: UserAccess) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def kb_links() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="Изменить реф-ссылку", callback_data="adm:links:set:ref")],
@@ -1136,6 +1138,7 @@ def kb_links() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def kb_postbacks(tenant_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1155,10 +1158,12 @@ async def show_links_screen(bot: Bot, tenant_id: int, chat_id: int):
             "Выберите, что изменить.")
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_links())
 
+
 async def show_params_screen(bot: Bot, tenant_id: int, chat_id: int):
     async with SessionLocal() as s:
         res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
         tnt = res.scalar_one()
+
     def kb_params(tnt_: Tenant) -> InlineKeyboardMarkup:
         mark_sub = "✅" if (tnt_.check_subscription or tnt_.check_subscription is None) else "❌"
         mark_dep = "✅" if (tnt_.check_deposit or tnt_.check_deposit is None) else "❌"
@@ -1178,6 +1183,7 @@ async def show_params_screen(bot: Bot, tenant_id: int, chat_id: int):
 
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", "⚙️ Параметры", kb_params(tnt))
 
+
 async def show_content_editor(bot: Bot, tenant_id: int, chat_id: int, lang: str, screen: str):
     title = await resolve_title(tenant_id, lang, screen)
     btn_tx = await resolve_primary_btn_text(tenant_id, lang, screen) or "—"
@@ -1193,6 +1199,7 @@ async def show_content_editor(bot: Bot, tenant_id: int, chat_id: int, lang: str,
         f"Картинка: {'кастом' if img else 'дефолт'}"
     )
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_content_editor(lang, screen))
+
 
 async def send_users_page(bot: Bot, tenant_id: int, chat_id: int, page: int):
     items, more, total = await fetch_users_page(tenant_id, page)
