@@ -979,6 +979,71 @@ async def fetch_users_page(tid: int, page: int):
     more = (page + 1) * PAGE_SIZE < total
     return items, more, total
 
+async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
+    q = (q or "").strip()
+    like = f"%{q}%"
+
+    # @username
+    if q.startswith("@"):
+        name = q[1:]
+        async with SessionLocal() as s:
+            res = await s.execute(
+                select(UserAccess)
+                .where(UserAccess.tenant_id == tid,
+                       UserAccess.username.ilike(f"%{name}%"))
+                .order_by(UserAccess.id.desc())
+                .limit(50)
+            )
+            items = res.scalars().all()
+        if items:
+            return items
+
+        # запасной вариант: пробегаем последние 200 и сверяем username через API
+        async with SessionLocal() as s:
+            res = await s.execute(
+                select(UserAccess)
+                .where(UserAccess.tenant_id == tid)
+                .order_by(UserAccess.id.desc())
+                .limit(200)
+            )
+            pool = res.scalars().all()
+        found = []
+        for ua in pool:
+            try:
+                ch = await bot.get_chat(ua.user_id)
+                if ch.username and ch.username.lower() == name.lower():
+                    found.append(ua)
+            except Exception:
+                pass
+        return found
+
+    # числа → пробуем как TG ID и как trader_id
+    m = re.search(r"\d{5,}", q)
+    or_parts = []
+    if m:
+        try:
+            tg_id = int(m.group(0))
+            or_parts.append(UserAccess.user_id == tg_id)
+        except ValueError:
+            pass
+
+    # trader_id, click_id, username (без @), а также подстрока
+    or_parts.extend([
+        UserAccess.trader_id == q,
+        UserAccess.trader_id.ilike(like),
+        UserAccess.click_id.ilike(like),
+        UserAccess.username.ilike(f"%{q.lstrip('@')}%"),
+    ])
+
+    async with SessionLocal() as s:
+        res = await s.execute(
+            select(UserAccess)
+            .where(UserAccess.tenant_id == tid, or_(*or_parts))
+            .order_by(UserAccess.id.desc())
+            .limit(50)
+        )
+        return res.scalars().all()
+
 
 def kb_admin_main() -> InlineKeyboardMarkup:
     rows = [
@@ -1544,27 +1609,24 @@ def make_child_router(tenant_id: int) -> Router:
         if not wait:
             return
 
-        # поиск пользователей
-        # поиск пользователей
         if wait == "users_search":
-            query_raw = (m.text or "").strip()
+            query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
 
-            # Используем уже объявленный выше helper _search_users(...)
-            items = await _search_users(m.bot, tenant_id, query_raw)
+            items = await _find_users_by_query(m.bot, tenant_id, query_raw)
 
             if not items:
-                await m.answer("Ничего не найдено.")
+                await m.answer("Ничего не нашёл по этому запросу.")
+                # Вернёмся к списку, чтобы не зависать
+                await send_users_page(m.bot, tenant_id, m.chat.id, page=0)
                 return
 
             if len(items) == 1:
-                # сразу карточка
                 await send_user_card(m.bot, tenant_id, m.chat.id, items[0].user_id)
                 return
 
-            # если несколько — список
             txt = f"🔎 Результаты поиска: {len(items)}"
-            kb = kb_users_list(items, page=0, more=False)
+            kb = kb_users_list(items[:PAGE_SIZE], page=0, more=(len(items) > PAGE_SIZE))
             await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
