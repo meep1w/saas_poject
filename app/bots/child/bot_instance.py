@@ -324,6 +324,15 @@ async def set_lang(tenant_id: int, user_id: int, lang: str):
             )
         await s.commit()
 
+async def has_lang_set(tenant_id: int, user_id: int) -> bool:
+    async with SessionLocal() as s:
+        res = await s.execute(
+            select(UserLang.id).where(
+                UserLang.tenant_id == tenant_id,
+                UserLang.user_id == user_id,
+            )
+        )
+        return res.scalar_one_or_none() is not None
 
 async def get_tenant(tenant_id: int) -> Tenant:
     async with SessionLocal() as s:
@@ -1257,7 +1266,7 @@ def make_child_router(tenant_id: int) -> Router:
     # ---- public
     @router.message(Command("start"))
     async def on_start(m: Message):
-        lang = await get_lang(tenant_id, m.from_user.id)
+        # создаём запись доступа и сохраним username при заходе
         acc = await get_or_create_access(tenant_id, m.from_user.id)
         if m.from_user.username:
             async with SessionLocal() as s:
@@ -1271,6 +1280,20 @@ def make_child_router(tenant_id: int) -> Router:
                 )
                 await s.commit()
 
+        # если язык ещё не выбран — показываем экран выбора языка и выходим
+        if not await has_lang_set(tenant_id, m.from_user.id):
+            def_lang = settings.LANG_DEFAULT  # например "ru" или "en"
+            title = await resolve_title(tenant_id, def_lang, "lang")
+            body = await resolve_body(tenant_id, def_lang, "lang")
+            default = t(def_lang, "lang_text")
+            text = f"<b>{title}</b>\n\n{body or default}"
+            await send_screen(
+                m.bot, tenant_id, m.chat.id, def_lang, "lang", text, build_lang_kb(def_lang)
+            )
+            return
+
+        # язык уже выбран — показываем меню как раньше
+        lang = await get_lang(tenant_id, m.from_user.id)
         tnt = await get_tenant(tenant_id)
         sup = tnt.support_url or settings.SUPPORT_URL
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
