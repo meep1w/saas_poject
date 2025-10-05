@@ -639,6 +639,29 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t(current, "back"), callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
+            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+        ]
+    )
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# ГЛОБАЛЬНАЯ клавиатура редактора контента (чтобы show_content_editor её видел)
+def kb_content_editor(lang: str, screen: str, snapshot: dict) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
+        [InlineKeyboardButton(text="✏️ Изменить заголовок", callback_data=f"adm:content:title:{lang}:{screen}")],
+        [InlineKeyboardButton(text="⌨️ Изменить текст кнопки", callback_data=f"adm:content:btn:{lang}:{screen}")],
+        [InlineKeyboardButton(text="♻️ Сбросить к дефолту", callback_data=f"adm:content:reset:{lang}:{screen}")],
+        [InlineKeyboardButton(text="📋 Список экранов", callback_data=f"adm:content:list:{lang}")],
+        [InlineKeyboardButton(text="🌐 Языки", callback_data="adm:content")],
+        [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
 # =========================
 #        Signal flow
 # =========================
@@ -853,14 +876,6 @@ def kb_postbacks(tenant_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")]
     ])
-
-def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
-        ]
-    )
 
 # ===== helpers to draw admin screens (без фейковых CallbackQuery) =====
 async def show_links_screen(bot: Bot, tenant_id: int, chat_id: int):
@@ -1104,6 +1119,7 @@ def make_child_router(tenant_id: int) -> Router:
                     or_(
                         UserAccess.trader_id.ilike(f"%{q}%"),
                         UserAccess.click_id.ilike(f"%{q}%"),
+                        UserAccess.username.ilike(f"%{q}%"),
                     )
                 ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
             )
@@ -1428,18 +1444,6 @@ def make_child_router(tenant_id: int) -> Router:
                 for code, title in screens]
         rows.append([InlineKeyboardButton(text="↩️ Языки", callback_data="adm:content")])
         rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def kb_content_editor(lang: str, screen: str, snapshot: dict) -> InlineKeyboardMarkup:
-        rows = [
-            [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
-            [InlineKeyboardButton(text="✏️ Изменить заголовок", callback_data=f"adm:content:title:{lang}:{screen}")],
-            [InlineKeyboardButton(text="⌨️ Изменить текст кнопки", callback_data=f"adm:content:btn:{lang}:{screen}")],
-            [InlineKeyboardButton(text="♻️ Сбросить к дефолту", callback_data=f"adm:content:reset:{lang}:{screen}")],
-            [InlineKeyboardButton(text="📋 Список экранов", callback_data=f"adm:content:list:{lang}")],
-            [InlineKeyboardButton(text="🌐 Языки", callback_data="adm:content")],
-            [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
-        ]
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @router.callback_query(F.data == "adm:content")
