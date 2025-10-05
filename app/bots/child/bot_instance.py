@@ -1258,7 +1258,7 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = "users_search"
-        await c.message.answer("Введите trader_id или click_id.")
+        await c.message.answer("Введите TG ID, @username, trader_id или часть click_id.")
         await c.answer()
 
     @router.callback_query(F.data == "adm:menu")
@@ -1532,72 +1532,27 @@ def make_child_router(tenant_id: int) -> Router:
             return
 
         # поиск пользователей
+        # поиск пользователей
         if wait == "users_search":
-            q = m.text.strip()
+            query_raw = (m.text or "").strip()
             ADMIN_WAIT.pop(key, None)
 
-            async with SessionLocal() as s:
-                found = []
+            # Используем уже объявленный выше helper _search_users(...)
+            items = await _search_users(m.bot, tenant_id, query_raw)
 
-                # 1) точный TG ID (число)
-                if re.fullmatch(r"-?\d{5,}", q or ""):
-                    res = await s.execute(
-                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
-                                                 UserAccess.user_id == int(q))
-                    )
-                    found = res.scalars().all()
-
-                # 2) точный @username
-                if not found and q.startswith("@"):
-                    uname = q[1:].lower()
-                    res = await s.execute(
-                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
-                                                 func.lower(UserAccess.username) == uname)
-                    )
-                    found = res.scalars().all()
-
-                # 3) точный click_id
-                if not found:
-                    res = await s.execute(
-                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
-                                                 UserAccess.click_id == q)
-                    )
-                    found = res.scalars().all()
-
-                # 4) точный trader_id
-                if not found:
-                    res = await s.execute(
-                        select(UserAccess).where(UserAccess.tenant_id == tenant_id,
-                                                 UserAccess.trader_id == q)
-                    )
-                    found = res.scalars().all()
-
-                # 5) частичный поиск по нескольким полям
-                if not found:
-                    like = f"%{q}%"
-                    res = await s.execute(
-                        select(UserAccess).where(
-                            UserAccess.tenant_id == tenant_id,
-                            or_(
-                                UserAccess.trader_id.ilike(like),
-                                UserAccess.click_id.ilike(like),
-                                UserAccess.username.ilike(like),
-                                cast(UserAccess.user_id, String).ilike(like),
-                            )
-                        ).order_by(UserAccess.id.desc()).limit(50)
-                    )
-                    found = res.scalars().all()
-
-            if not found:
+            if not items:
                 await m.answer("Ничего не найдено.")
                 return
 
-            if len(found) == 1:
-                await send_user_card(m.bot, tenant_id, m.chat.id, found[0].user_id)
-            else:
-                txt = f"🔎 Результаты поиска: {len(found)}"
-                kb = kb_users_list(found, page=0, more=False)
-                await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
+            if len(items) == 1:
+                # сразу карточка
+                await send_user_card(m.bot, tenant_id, m.chat.id, items[0].user_id)
+                return
+
+            # если несколько — список
+            txt = f"🔎 Результаты поиска: {len(items)}"
+            kb = kb_users_list(items, page=0, more=False)
+            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
         # контент: заголовок
