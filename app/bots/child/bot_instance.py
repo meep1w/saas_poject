@@ -1526,7 +1526,7 @@ def make_child_router(tenant_id: int) -> Router:
             "• trader_id → <code>trader_id</code>\n"
             "• sumdep → <code>sumdep</code>\n\n"
             "<b>Повторный депозит</b>\n"
-            f"<code>{base}/pp/rd?click_id={{click_id}}&sumdep={{sumdep}}&tid={tid}{sec}</code>\n"
+            f"<code>{base}/pp/rd?click_id={{click_id}}&sumdep={{sumdep}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n"
             "• click_id → <code>click_id</code>\n"
             "• trader_id → <code>trader_id</code>\n"
             "• sumdep → <code>sumdep</code>\n\n"
@@ -1930,7 +1930,12 @@ def make_child_router(tenant_id: int) -> Router:
             [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
         ])
 
-    def kb_bc_actions(has_photo: bool, has_video: bool, fmt: str, disable_preview: bool) -> InlineKeyboardMarkup:
+    def kb_bc_actions(
+            has_photo: bool,
+            has_video: bool,
+            fmt: str = "HTML",
+            disable_preview: bool = False,
+    ) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton(
@@ -1942,10 +1947,16 @@ def make_child_router(tenant_id: int) -> Router:
                     callback_data="adm:bc:add_video"
                 ),
             ],
-            [InlineKeyboardButton(text=f"🅵 Формат: {fmt}", callback_data="adm:bc:toggle_fmt")],
-            [InlineKeyboardButton(text=("🔗 Превью ссылок: выкл" if disable_preview else "🔗 Превью ссылок: вкл"),
-                                  callback_data="adm:bc:toggle_preview")],
-            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="adm:bc:preview")],
+            [
+                InlineKeyboardButton(
+                    text=("FMT: HTML" if fmt == "HTML" else "FMT: MarkdownV2"),
+                    callback_data="adm:bc:toggle_fmt"
+                ),
+                InlineKeyboardButton(
+                    text=("🔗 Preview: off" if disable_preview else "🔗 Preview: on"),
+                    callback_data="adm:bc:toggle_preview"
+                ),
+            ],
             [InlineKeyboardButton(text="🚀 Запустить", callback_data="adm:bc:run_now")],
             [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
         ]
@@ -1999,17 +2010,35 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data == "adm:bc:toggle_fmt")
     async def adm_bc_toggle_fmt(c: CallbackQuery, state: FSMContext):
-        d = await state.get_data()
-        new_fmt = "MarkdownV2" if d.get("fmt", "HTML") == "HTML" else "HTML"
+        data = await state.get_data()
+        new_fmt = "MarkdownV2" if data.get("fmt", "HTML") == "HTML" else "HTML"
         await state.update_data(fmt=new_fmt)
+        data = await state.get_data()
+        await c.message.edit_reply_markup(
+            reply_markup=kb_bc_actions(
+                bool(data.get("photo_id")),
+                bool(data.get("video_id")),
+                data.get("fmt", "HTML"),
+                bool(data.get("disable_preview", False)),
+            )
+        )
         await c.answer(f"Формат: {new_fmt}")
 
     @router.callback_query(F.data == "adm:bc:toggle_preview")
-    async def adm_bc_toggle_preview(c: CallbackQuery, state: FSMContext):
-        d = await state.get_data()
-        cur = bool(d.get("disable_preview", False))
-        await state.update_data(disable_preview=not cur)
-        await c.answer("Превью ссылок: " + ("выкл" if not cur else "вкл"))
+    async def adm_bc_toggle_prev(c: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        new_dp = not bool(data.get("disable_preview", False))
+        await state.update_data(disable_preview=new_dp)
+        data = await state.get_data()
+        await c.message.edit_reply_markup(
+            reply_markup=kb_bc_actions(
+                bool(data.get("photo_id")),
+                bool(data.get("video_id")),
+                data.get("fmt", "HTML"),
+                bool(data.get("disable_preview", False)),
+            )
+        )
+        await c.answer("Предпросмотр " + ("выкл" if new_dp else "вкл"))
 
     @router.callback_query(F.data == "adm:bc:preview")
     async def adm_bc_preview(c: CallbackQuery, state: FSMContext):
