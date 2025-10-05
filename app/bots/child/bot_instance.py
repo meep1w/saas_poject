@@ -1978,15 +1978,22 @@ def make_child_router(tenant_id: int) -> Router:
         if not (m.text and m.text.strip()):
             await m.answer("Нужен именно текст. Пришлите его одним сообщением.")
             return
-        await state.update_data(text=m.text.strip())
+
+        # Берём уже «готовый» HTML от aiogram — он собран из entities Телеграма
+        text_html = m.html_text or m.text.strip()
+
+        await state.update_data(
+            text=text_html,
+            fmt="HTML",  # чтобы потом отправлять с parse_mode=HTML
+            disable_preview=False  # или True, если хотите отключать предпросмотр ссылок
+        )
+
         data = await state.get_data()
         await m.answer(
             "Текст сохранён и готов к рассылке. Добавить что-нибудь ещё?",
             reply_markup=kb_bc_actions(
                 has_photo=bool(data.get("photo_id")),
                 has_video=bool(data.get("video_id")),
-                fmt=data.get("fmt", "HTML"),
-                disable_preview=bool(data.get("disable_preview", False)),
             ),
         )
 
