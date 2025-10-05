@@ -1930,7 +1930,7 @@ def make_child_router(tenant_id: int) -> Router:
             [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
         ])
 
-    def kb_bc_actions(has_photo: bool, has_video: bool) -> InlineKeyboardMarkup:
+    def kb_bc_actions(has_photo: bool, has_video: bool, fmt: str, disable_preview: bool) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton(
@@ -1942,6 +1942,10 @@ def make_child_router(tenant_id: int) -> Router:
                     callback_data="adm:bc:add_video"
                 ),
             ],
+            [InlineKeyboardButton(text=f"🅵 Формат: {fmt}", callback_data="adm:bc:toggle_fmt")],
+            [InlineKeyboardButton(text=("🔗 Превью ссылок: выкл" if disable_preview else "🔗 Превью ссылок: вкл"),
+                                  callback_data="adm:bc:toggle_preview")],
+            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="adm:bc:preview")],
             [InlineKeyboardButton(text="🚀 Запустить", callback_data="adm:bc:run_now")],
             [InlineKeyboardButton(text="↩️ Отмена", callback_data="adm:bc:cancel")],
         ]
@@ -1961,7 +1965,8 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         seg = c.data.split(":")[-1]
-        await state.update_data(segment=seg, text=None, photo_id=None, video_id=None)
+        await state.update_data(segment=seg, text=None, photo_id=None, video_id=None,
+                                fmt="HTML", disable_preview=False)
         await state.set_state(BcFSM.WAIT_TEXT)
         await c.message.answer("Отправьте текст рассылки одним сообщением.")
         await c.answer()
@@ -1980,8 +1985,43 @@ def make_child_router(tenant_id: int) -> Router:
             reply_markup=kb_bc_actions(
                 has_photo=bool(data.get("photo_id")),
                 has_video=bool(data.get("video_id")),
+                fmt=data.get("fmt", "HTML"),
+                disable_preview=bool(data.get("disable_preview", False)),
             ),
         )
+
+    @router.callback_query(F.data == "adm:bc:toggle_fmt")
+    async def adm_bc_toggle_fmt(c: CallbackQuery, state: FSMContext):
+        d = await state.get_data()
+        new_fmt = "MarkdownV2" if d.get("fmt", "HTML") == "HTML" else "HTML"
+        await state.update_data(fmt=new_fmt)
+        await c.answer(f"Формат: {new_fmt}")
+
+    @router.callback_query(F.data == "adm:bc:toggle_preview")
+    async def adm_bc_toggle_preview(c: CallbackQuery, state: FSMContext):
+        d = await state.get_data()
+        cur = bool(d.get("disable_preview", False))
+        await state.update_data(disable_preview=not cur)
+        await c.answer("Превью ссылок: " + ("выкл" if not cur else "вкл"))
+
+    @router.callback_query(F.data == "adm:bc:preview")
+    async def adm_bc_preview(c: CallbackQuery, state: FSMContext):
+        d = await state.get_data()
+        text = (d.get("text") or "").strip()
+        if not text:
+            await c.answer("Нет текста для предпросмотра", show_alert=True);
+            return
+
+        fmt = d.get("fmt", "HTML")
+        dp = bool(d.get("disable_preview", False))
+
+        if d.get("video_id"):
+            await c.message.answer_video(d.get("video_id"), caption=text, parse_mode=fmt)
+        elif d.get("photo_id"):
+            await c.message.answer_photo(d.get("photo_id"), caption=text, parse_mode=fmt)
+        else:
+            await c.message.answer(text, parse_mode=fmt, disable_web_page_preview=dp)
+        await c.answer("Предпросмотр отправлен")
 
     @router.callback_query(F.data == "adm:bc:add_photo")
     async def adm_bc_ask_photo(c: CallbackQuery, state: FSMContext):
@@ -2056,6 +2096,10 @@ def make_child_router(tenant_id: int) -> Router:
         photo_id = data.get("photo_id")
         video_id = data.get("video_id")
 
+        # <-- ВОТ ЗДЕСЬ
+        fmt = data.get("fmt", "HTML")  # parse_mode
+        dp = bool(data.get("disable_preview", False))  # disable_web_page_preview
+
         if not seg:
             await c.answer("Выберите сегмент получателей.", show_alert=True)
             return
@@ -2088,11 +2132,12 @@ def make_child_router(tenant_id: int) -> Router:
         for i, uid in enumerate(ids, start=1):
             try:
                 if video_id:
-                    await bot.send_video(uid, video=video_id, caption=text)
+                    # caption поддерживает parse_mode
+                    await bot.send_video(uid, video=video_id, caption=text, parse_mode=fmt)
                 elif photo_id:
-                    await bot.send_photo(uid, photo=photo_id, caption=text)
+                    await bot.send_photo(uid, photo=photo_id, caption=text, parse_mode=fmt)
                 else:
-                    await bot.send_message(uid, text)
+                    await bot.send_message(uid, text, parse_mode=fmt, disable_web_page_preview=dp)
                 ok += 1
             except Exception:
                 fail += 1
