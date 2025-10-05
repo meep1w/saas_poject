@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
-import re
-import html
+
 import asyncio
 import hashlib
 import hmac
@@ -37,34 +36,6 @@ from app.models import (
     ContentOverride,
 )
 from app.settings import settings
-
-# =========================
-#      Safe text limits
-# =========================
-BTN_MAX = 64          # Telegram: 1..64 symbols
-CAPTION_MAX = 1024    # caption for photo
-TEXT_MAX = 4096       # message text
-
-def _clamp(txt: Optional[str], n: int) -> str:
-    s = (txt or "").strip()
-    return s[:n] if len(s) > n else s
-
-def _safe_html(txt: Optional[str]) -> str:
-    return html.escape(txt or "", quote=True)
-
-def _sanitize_btn_text(txt: Optional[str], fallback: str) -> str:
-    s = (txt or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    if not s:
-        s = fallback
-    return _clamp(s, BTN_MAX)
-
-def _cap_caption(txt: str) -> str:
-    return _clamp(txt, CAPTION_MAX)
-
-def _cap_text(txt: str) -> str:
-    return _clamp(txt, TEXT_MAX)
-
 
 # =========================
 #            i18n
@@ -169,7 +140,6 @@ I18N = {
 }
 LANGS = ["ru", "en", "hi", "es"]
 
-
 # =========================
 #        Assets setup
 # =========================
@@ -186,13 +156,11 @@ ASSETS = {
 }
 ASSETS_DIR = Path("assets")
 
-
 # =========================
 #         Helpers
 # =========================
 def _render_ref_anchor(url: str) -> str:
-    return f'<a href="{_safe_html(url)}">PocketOption</a>'
-
+    return f'<a href="{url}">PocketOption</a>'
 
 def build_howto_text(lang: str, ref_url: str) -> str:
     ref = _render_ref_anchor(ref_url)
@@ -262,11 +230,9 @@ def build_howto_text(lang: str, ref_url: str) -> str:
     txt = mapping.get(lang, EN)
     return txt.replace("{{ref}}", ref).replace("{{reff}}", ref)
 
-
 def t(lang: str, key: str) -> str:
     base = I18N.get(lang) or I18N["en"]
     return base.get(key) or I18N["en"].get(key, key)
-
 
 def asset_for(lang: str, screen: str) -> Optional[Path]:
     candidates = []
@@ -279,22 +245,18 @@ def asset_for(lang: str, screen: str) -> Optional[Path]:
             return p
     return None
 
-
 def add_params(url: str, **params) -> str:
     u = urlparse(url)
     q = dict(parse_qsl(u.query))
     q.update({k: str(v) for k, v in params.items() if v is not None})
     return urlunparse(u._replace(query=urlencode(q)))
 
-
 SALT = getattr(settings, "CLICK_SALT", "dev_salt_change_me")
-
 
 def make_click_id(tenant_id: int, user_id: int) -> str:
     raw = f"{tenant_id}:{user_id}".encode()
     digest = hmac.new(SALT.encode(), raw, hashlib.sha256).hexdigest()[:24]
     return f"{tenant_id}-{digest}"
-
 
 async def ensure_click_id(tenant_id: int, user_id: int) -> str:
     async with SessionLocal() as s:
@@ -316,7 +278,6 @@ async def ensure_click_id(tenant_id: int, user_id: int) -> str:
         await s.commit()
         return cid
 
-
 async def get_lang(tenant_id: int, user_id: int) -> str:
     async with SessionLocal() as s:
         res = await s.execute(
@@ -324,7 +285,6 @@ async def get_lang(tenant_id: int, user_id: int) -> str:
         )
         row = res.scalar_one_or_none()
         return row.lang if row else settings.LANG_DEFAULT
-
 
 async def set_lang(tenant_id: int, user_id: int, lang: str):
     async with SessionLocal() as s:
@@ -342,12 +302,10 @@ async def set_lang(tenant_id: int, user_id: int, lang: str):
             )
         await s.commit()
 
-
 async def get_tenant(tenant_id: int) -> Tenant:
     async with SessionLocal() as s:
         res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
         return res.scalar_one()
-
 
 async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
     async with SessionLocal() as s:
@@ -374,7 +332,6 @@ async def get_or_create_access(tenant_id: int, user_id: int) -> UserAccess:
             acc = res.scalar_one()
         return acc
 
-
 async def mark_unlocked_shown(tenant_id: int, user_id: int):
     async with SessionLocal() as s:
         await s.execute(
@@ -389,7 +346,6 @@ async def mark_unlocked_shown(tenant_id: int, user_id: int):
         )
         await s.commit()
 
-
 async def mark_platinum_shown(tenant_id: int, user_id: int):
     async with SessionLocal() as s:
         await s.execute(
@@ -398,7 +354,6 @@ async def mark_platinum_shown(tenant_id: int, user_id: int):
             .values(platinum_shown=True)
         )
         await s.commit()
-
 
 async def set_last_bot_message_id(tenant_id: int, chat_id: int, message_id: Optional[int]):
     async with SessionLocal() as s:
@@ -418,7 +373,6 @@ async def set_last_bot_message_id(tenant_id: int, chat_id: int, message_id: Opti
             )
         await s.commit()
 
-
 async def get_last_bot_message_id(tenant_id: int, chat_id: int) -> Optional[int]:
     async with SessionLocal() as s:
         res = await s.execute(
@@ -426,7 +380,6 @@ async def get_last_bot_message_id(tenant_id: int, chat_id: int) -> Optional[int]
         )
         st = res.scalar_one_or_none()
         return st.last_bot_message_id if st else None
-
 
 # -------- content overrides --------
 async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
@@ -438,8 +391,9 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
                    ContentOverride.screen == screen)
         )
         ov = r.scalar_one_or_none()
-        if ov and ov.title:
+        if ov and getattr(ov, "title", None):
             return ov.title
+    # fallback
     if screen == "menu":
         return t(lang, "menu_title")
     if screen == "howto":
@@ -458,7 +412,6 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
         return "Панель администратора"
     return screen
 
-
 async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
     async with SessionLocal() as s:
         r = await s.execute(
@@ -468,7 +421,7 @@ async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Op
                    ContentOverride.screen == screen)
         )
         ov = r.scalar_one_or_none()
-        if ov and ov.primary_btn_text:
+        if ov and getattr(ov, "primary_btn_text", None):
             return ov.primary_btn_text
     if screen == "menu":
         return t(lang, "btn_signal")
@@ -476,6 +429,15 @@ async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Op
         return t(lang, "btn_open_app")
     return None
 
+def _pick_override_image_value(ov: ContentOverride) -> Optional[str]:
+    """
+    БЕЗОПАСНО возвращаем значение картинки, учитывая разные возможные имена колонок.
+    """
+    for name in ("image_path", "image", "photo_id", "photo_file_id"):
+        val = getattr(ov, name, None)
+        if val:
+            return val
+    return None
 
 async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]:
     async with SessionLocal() as s:
@@ -486,10 +448,13 @@ async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]
                    ContentOverride.screen == screen)
         )
         ov = r.scalar_one_or_none()
-        if ov and ov.image_path:
-            return ov.image_path  # file_id | local path | http(s) URL
+        if ov:
+            return _pick_override_image_value(ov)
     return None
 
+def _filter_allowed_columns(table, vals: dict) -> dict:
+    cols = {c.name for c in table.columns}
+    return {k: v for k, v in vals.items() if k in cols}
 
 async def upsert_override(
     tenant_id: int,
@@ -497,7 +462,11 @@ async def upsert_override(
     screen: str,
     title: Optional[str] = None,
     primary_btn_text: Optional[str] = None,
+    # поддерживаем разные возможные имена колонок под картинку
     image_path: Optional[str] = None,
+    image: Optional[str] = None,
+    photo_id: Optional[str] = None,
+    photo_file_id: Optional[str] = None,
     reset: bool = False,
 ):
     async with SessionLocal() as s:
@@ -508,32 +477,40 @@ async def upsert_override(
                    ContentOverride.screen == screen)
         )
         ov = r.scalar_one_or_none()
+
         if reset:
             if ov:
                 await s.delete(ov)
             await s.commit()
             return
 
-        vals = {}
+        raw_vals = {}
         if title is not None:
-            vals["title"] = _clamp(title, TEXT_MAX)
+            raw_vals["title"] = title
         if primary_btn_text is not None:
-            vals["primary_btn_text"] = _sanitize_btn_text(primary_btn_text, t(lang, "btn_signal"))
-        if image_path is not None:
-            vals["image_path"] = (image_path or "").strip()
+            raw_vals["primary_btn_text"] = primary_btn_text
+        # сразу кладём одно и то же значение во все «возможные» поля
+        for k, v in {
+            "image_path": image_path,
+            "image": image or image_path,
+            "photo_id": photo_id or image_path,
+            "photo_file_id": photo_file_id or image_path,
+        }.items():
+            if v is not None:
+                raw_vals[k] = v
+
+        table = ContentOverride.__table__
+        vals = _filter_allowed_columns(table, raw_vals)
 
         if ov:
-            await s.execute(
-                ContentOverride.__table__.update().where(ContentOverride.id == ov.id).values(**vals)
-            )
-        else:
-            await s.execute(
-                ContentOverride.__table__.insert().values(
-                    tenant_id=tenant_id, lang=lang, screen=screen, **vals
+            if vals:
+                await s.execute(
+                    table.update().where(ContentOverride.id == ov.id).values(**vals)
                 )
-            )
+        else:
+            base = {"tenant_id": tenant_id, "lang": lang, "screen": screen}
+            await s.execute(table.insert().values(**base, **vals))
         await s.commit()
-
 
 # -------- common send --------
 async def send_screen(
@@ -545,15 +522,6 @@ async def send_screen(
     text: str,
     kb: Optional[InlineKeyboardMarkup],
 ):
-    """
-    Надёжная отправка экрана:
-      1) удаляем предыдущее ботовское сообщение (не критично)
-      2) пробуем кастомную картинку (file_id | локальный файл | http url)
-      3) пробуем дефолтный ассет
-      4) фолбэк: обычное сообщение
-    Все ошибки ловим; текст/подпись ограничиваем по лимитам Telegram.
-    """
-    # удалить предыдущий экран (игнорировать ошибки)
     last_id = await get_last_bot_message_id(tenant_id, chat_id)
     if last_id:
         try:
@@ -561,61 +529,21 @@ async def send_screen(
         except (TelegramBadRequest, TelegramForbiddenError):
             pass
 
-    msg = None
-    caption = _cap_caption(text)
-    content_sent = False
-
-    # helper: попытка отправить фото
-    async def _try_send_photo(candidate) -> Optional[Message]:
-        try:
-            return await bot.send_photo(chat_id, photo=candidate, caption=caption, reply_markup=kb)
-        except (TelegramBadRequest, TelegramForbiddenError):
-            return None
-        except Exception:
-            return None
-
-    # 1) кастомная картинка
     custom = await resolve_image(tenant_id, lang, screen)
+    photo = None
     if custom:
         p = Path(custom)
-        candidate = None
-        if p.exists():
-            candidate = FSInputFile(str(p))
-        else:
-            # допускаем file_id или http(s) URL
-            if custom.startswith("http://") or custom.startswith("https://") or len(custom) > 20:
-                candidate = custom
-        if candidate:
-            msg = await _try_send_photo(candidate)
-            content_sent = bool(msg)
-
-    # 2) дефолтный ассет
-    if not content_sent:
-        asset = asset_for(lang, screen)
-        if asset and asset.exists():
-            msg = await _try_send_photo(FSInputFile(str(asset)))
-            content_sent = bool(msg)
-
-    # 3) обычное сообщение
-    if not content_sent:
-        safe_text = _cap_text(text)
-        try:
-            msg = await bot.send_message(chat_id, safe_text, reply_markup=kb, disable_web_page_preview=True)
-            content_sent = True
-        except (TelegramBadRequest, TelegramForbiddenError):
-            # даже текст «сломать» сложно, но если вдруг — попробуем голый трим
-            try:
-                msg = await bot.send_message(chat_id, _clamp(html.unescape(safe_text), 800), reply_markup=kb)
-                content_sent = True
-            except Exception:
-                content_sent = False
-
-    if content_sent and msg:
-        await set_last_bot_message_id(tenant_id, chat_id, msg.message_id)
+        photo = FSInputFile(str(p)) if p.exists() else custom
+    if photo:
+        msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
     else:
-        # финальный фейл — не сохраняем last_id, но не даём упасть выше
-        pass
+        p = asset_for(lang, screen)
+        if p and p.exists():
+            msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
+        else:
+            msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
+    await set_last_bot_message_id(tenant_id, chat_id, msg.message_id)
 
 # -------- metrics --------
 async def user_deposit_sum(tid: int, click_id: str) -> float:
@@ -626,7 +554,6 @@ async def user_deposit_sum(tid: int, click_id: str) -> float:
             )
         )).scalar()
         return float(val or 0.0)
-
 
 # =========================
 #         Keyboards
@@ -641,7 +568,6 @@ def kb_subscribe(lang: str, ch_url: Optional[str]) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def kb_register(lang: str, url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -650,7 +576,6 @@ def kb_register(lang: str, url: str) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def kb_deposit(lang: str, url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -658,7 +583,6 @@ def kb_deposit(lang: str, url: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
         ]
     )
-
 
 def kb_open_app(lang: str, support_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -669,7 +593,6 @@ def kb_open_app(lang: str, support_url: str) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def kb_open_platinum(lang: str, support_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -679,25 +602,16 @@ def kb_open_platinum(lang: str, support_url: str) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def main_kb(lang: str, acc: UserAccess, support_url: str, menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
-    """
-    1) Инструкция
-    2) Поддержка | Язык
-    3) Нижняя широкая: открыть VIP / получить сигнал
-    """
     direct = acc.has_deposit or acc.is_platinum
-    signal_text = _sanitize_btn_text(menu_btn_text, t(lang, "btn_signal"))
+    signal_text = menu_btn_text or t(lang, "btn_signal")
 
     rows: list[list[InlineKeyboardButton]] = []
-
     rows.append([InlineKeyboardButton(text=t(lang, "btn_howto"), callback_data="howto")])
-
     rows.append([
         InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url),
         InlineKeyboardButton(text=t(lang, "btn_lang"), callback_data="lang"),
     ])
-
     if acc.is_platinum:
         rows.append([
             InlineKeyboardButton(text=t(lang, "btn_open_vip"), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))
@@ -712,7 +626,6 @@ def main_kb(lang: str, acc: UserAccess, support_url: str, menu_btn_text: Optiona
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     row, rows = [], []
     for code in LANGS:
@@ -726,7 +639,6 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t(current, "back"), callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
 # =========================
 #        Signal flow
 # =========================
@@ -739,12 +651,10 @@ async def check_membership(bot: Bot, channel_id: Optional[int], user_id: int) ->
     except Exception:
         return False
 
-
 async def _auto_check_after_subscribe(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lang: str):
     await asyncio.sleep(12)
     if await check_membership(bot, (await get_tenant(tenant_id)).gate_channel_id, user_id):
         await route_signal(bot, tenant_id, user_id, chat_id, lang)
-
 
 async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lang: str):
     async with SessionLocal() as s:
@@ -777,7 +687,7 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
     # 1) Подписка (если включена)
     if tenant.check_subscription:
         if not await check_membership(bot, tenant.gate_channel_id, user_id):
-            text = f"<b>{_safe_html(t(lang, 'gate_sub_title'))}</b>\n\n{_safe_html(t(lang, 'gate_sub_text'))}"
+            text = f"<b>{t(lang, 'gate_sub_title')}</b>\n\n{t(lang, 'gate_sub_text')}"
             await send_screen(bot, tenant_id, chat_id, lang, "subscribe", text, kb_subscribe(lang, tenant.gate_channel_url))
             asyncio.create_task(_auto_check_after_subscribe(bot, tenant_id, user_id, chat_id, lang))
             return
@@ -787,7 +697,7 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
     cid = await ensure_click_id(tenant_id, user_id)
     ref_url = add_params(ref, click_id=cid, tid=tenant_id)
     if not access.is_registered:
-        text = f"<b>{_safe_html(t(lang, 'gate_reg_title'))}</b>\n\n{_safe_html(t(lang, 'gate_reg_text'))}"
+        text = f"<b>{t(lang, 'gate_reg_title')}</b>\n\n{t(lang, 'gate_reg_text')}"
         await send_screen(bot, tenant_id, chat_id, lang, "register", text, kb_register(lang, ref_url))
         return
 
@@ -830,14 +740,14 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             hint = hints.get(lang, hints["en"])
 
             text = (
-                f"<b>{_safe_html(t(lang, 'gate_dep_title'))}</b>\n\n"
-                f"{_safe_html(t(lang, 'gate_dep_text'))}{hint}"
+                f"<b>{t(lang, 'gate_dep_title')}</b>\n\n"
+                f"{t(lang, 'gate_dep_text')}{hint}"
             )
 
             await send_screen(bot, tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
             return
 
-    # >>> Автовыдача Platinum по сумме депозитов
+    # авто-Platinum
     threshold = float(tenant.platinum_threshold_usd or 500.0)
     total_now = await user_deposit_sum(tenant_id, cid)
     if not access.is_platinum and total_now >= threshold:
@@ -853,30 +763,28 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             await s.commit()
         access.is_platinum = True
         access.platinum_shown = False
-    # <<<
 
-    # 4) Platinum уведомление
+    # Platinum уведомление
     if access.is_platinum and not access.platinum_shown:
-        text = f"<b>{_safe_html(t(lang, 'platinum_title'))}</b>\n\n{_safe_html(t(lang, 'platinum_text'))}"
+        text = f"<b>{t(lang, 'platinum_title')}</b>\n\n{t(lang, 'platinum_text')}"
         await send_screen(bot, tenant_id, chat_id, lang, "platinum", text, kb_open_platinum(lang, support_url))
         await mark_platinum_shown(tenant_id, user_id)
         return
 
-    # 5) Доступ открыт
+    # “Доступ открыт”
     if not access.unlocked_shown:
-        text = f"<b>{_safe_html(t(lang, 'unlocked_title'))}</b>\n\n{_safe_html(t(lang, 'unlocked_text'))}"
+        text = f"<b>{t(lang, 'unlocked_title')}</b>\n\n{t(lang, 'unlocked_text')}"
         await send_screen(bot, tenant_id, chat_id, lang, "unlocked", text, kb_open_app(lang, support_url))
         await mark_unlocked_shown(tenant_id, user_id)
         return
 
-    # 6) Меню
+    # Меню
     title = await resolve_title(tenant_id, lang, "menu")
     btn_text = await resolve_primary_btn_text(tenant_id, lang, "menu")
     await send_screen(
-        bot, tenant_id, chat_id, lang, "menu", _cap_text(title),
+        bot, tenant_id, chat_id, lang, "menu", title,
         main_kb(lang, access, support_url, btn_text)
     )
-
 
 # =========================
 #        Admin section
@@ -896,10 +804,9 @@ def kb_admin_main() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def kb_users_list(items: list[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
+def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeyboardMarkup:
     rows = []
     rows.append([InlineKeyboardButton(text="🔎 Поиск", callback_data="adm:users:search")])
-
     for ua in items:
         mark_r = "✅" if ua.is_registered else "❌"
         mark_d = "✅" if ua.has_deposit else "❌"
@@ -955,6 +862,78 @@ def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
         ]
     )
 
+# ===== helpers to draw admin screens (без фейковых CallbackQuery) =====
+async def show_links_screen(bot: Bot, tenant_id: int, chat_id: int):
+    tnt = await get_tenant(tenant_id)
+    text = ("🔗 Ссылки\n\n"
+            f"Ref: {tnt.ref_link or '—'}\n"
+            f"Deposit: {tnt.deposit_link or '—'}\n"
+            f"Channel ID: {tnt.gate_channel_id or '—'}\n"
+            f"Channel URL: {tnt.gate_channel_url or '—'}\n"
+            f"Support URL: {tnt.support_url or settings.SUPPORT_URL}\n"
+            f"PB Secret: {tnt.pb_secret or '—'}\n\n"
+            "Выберите, что изменить.")
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_links())
+
+async def show_params_screen(bot: Bot, tenant_id: int, chat_id: int):
+    async with SessionLocal() as s:
+        res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
+        tnt = res.scalar_one()
+    def kb_params(tnt_: Tenant) -> InlineKeyboardMarkup:
+        mark_sub = "✅" if (tnt_.check_subscription or tnt_.check_subscription is None) else "❌"
+        mark_dep = "✅" if (tnt_.check_deposit or tnt_.check_deposit is None) else "❌"
+        rows = [
+            [InlineKeyboardButton(text="🔒 Регистрация", callback_data="adm:param:reg_locked")],
+            [
+                InlineKeyboardButton(text=f"{mark_sub} Проверка подписки", callback_data="adm:param:toggle:sub"),
+                InlineKeyboardButton(text=f"💵 Мин. деп: {int(tnt_.min_deposit_usd or 0)}$", callback_data="adm:param:set:min_dep"),
+            ],
+            [
+                InlineKeyboardButton(text=f"{mark_dep} Проверка депозита", callback_data="adm:param:toggle:dep"),
+                InlineKeyboardButton(text=f"💠 Порог Platinum: {int(tnt_.platinum_threshold_usd or 0)}$", callback_data="adm:param:set:plat"),
+            ],
+            [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", "⚙️ Параметры", kb_params(tnt))
+
+async def show_content_editor(bot: Bot, tenant_id: int, chat_id: int, lang: str, screen: str):
+    title = await resolve_title(tenant_id, lang, screen)
+    btn_tx = await resolve_primary_btn_text(tenant_id, lang, screen) or "—"
+    img = await resolve_image(tenant_id, lang, screen)
+    text = f"🧩 Редактор — {screen} ({lang.upper()})\n\nЗаголовок: <b>{title}</b>\nТекст кнопки: <code>{btn_tx}</code>\nКартинка: {'кастом' if img else 'дефолт'}"
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_content_editor(lang, screen, {}))
+
+async def send_users_page(bot: Bot, tenant_id: int, chat_id: int, page: int):
+    items, more, total = await _fetch_users_page(tenant_id, page)
+    txt = f"👤 Пользователи ({total or 0})\n\nВыберите пользователя:"
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", txt, kb_users_list(items, page, more))
+
+async def send_user_card(bot: Bot, tenant_id: int, chat_id: int, uid: int):
+    async with SessionLocal() as s:
+        res = await s.execute(
+            select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == uid))
+        ua = res.scalar_one_or_none()
+    if not ua:
+        await bot.send_message(chat_id, "Пользователь не найден")
+        return
+    dep_sum = await user_deposit_sum(tenant_id, ua.click_id or "")
+    lang = await get_lang(tenant_id, uid)
+    text = (
+        f"🧾 Карточка пользователя\n\n"
+        f"TG ID: <code>{ua.user_id}</code>\n"
+        f"Язык: {lang}\n"
+        f"Click ID: <code>{ua.click_id or '-'}</code>\n"
+        f"Trader ID: <code>{ua.trader_id or '-'}</code>\n"
+        f"Регистрация: {'✅' if ua.is_registered else '❌'}\n"
+        f"Депозит (факт): {'✅' if ua.has_deposit else '❌'}\n"
+        f"Сумма депозитов: {dep_sum:.2f}\n"
+        f"Platinum: {'💠' if ua.is_platinum else '•'}\n"
+        f"Создан: {ua.created_at:%Y-%m-%d %H:%M}\n"
+    )
+    await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_user_card(ua))
+
 # ---- Admin handlers
 def make_child_router(tenant_id: int) -> Router:
     router = Router()
@@ -981,14 +960,14 @@ def make_child_router(tenant_id: int) -> Router:
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
         title = await resolve_title(tenant_id, lang, "menu")
         await send_screen(
-            m.bot, tenant_id, m.chat.id, lang, "menu", _cap_text(title),
+            m.bot, tenant_id, m.chat.id, lang, "menu", title,
             main_kb(lang, acc, sup, menu_btn)
         )
 
     @router.message(Command("my_click"))
     async def my_click(m: Message):
         cid = await ensure_click_id(tenant_id, m.from_user.id)
-        await m.answer(f"Ваш click_id:\n<code>{_safe_html(cid)}</code>")
+        await m.answer(f"Ваш click_id:\n<code>{cid}</code>")
 
     @router.callback_query(F.data == "menu")
     async def cb_menu(c: CallbackQuery):
@@ -999,7 +978,7 @@ def make_child_router(tenant_id: int) -> Router:
         menu_btn = await resolve_primary_btn_text(tenant_id, lang, "menu")
         title = await resolve_title(tenant_id, lang, "menu")
         await send_screen(
-            c.bot, tenant_id, c.message.chat.id, lang, "menu", _cap_text(title),
+            c.bot, tenant_id, c.message.chat.id, lang, "menu", title,
             main_kb(lang, acc, sup, menu_btn)
         )
         await c.answer()
@@ -1031,7 +1010,7 @@ def make_child_router(tenant_id: int) -> Router:
     @router.callback_query(F.data == "lang")
     async def cb_lang(c: CallbackQuery):
         lang = await get_lang(tenant_id, c.from_user.id)
-        text = f"<b>{_safe_html(t(lang, 'lang_title'))}</b>\n\n{_safe_html(t(lang, 'lang_text'))}"
+        text = f"<b>{t(lang, 'lang_title')}</b>\n\n{t(lang, 'lang_text')}"
         await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "lang", text, build_lang_kb(lang))
         await c.answer()
 
@@ -1048,7 +1027,7 @@ def make_child_router(tenant_id: int) -> Router:
         title = await resolve_title(tenant_id, new_lang, "menu")
         menu_btn = await resolve_primary_btn_text(tenant_id, new_lang, "menu")
         await send_screen(
-            c.bot, tenant_id, c.message.chat.id, new_lang, "menu", _cap_text(title),
+            c.bot, tenant_id, c.message.chat.id, new_lang, "menu", title,
             main_kb(new_lang, acc, sup, menu_btn)
         )
         await c.answer()
@@ -1064,7 +1043,7 @@ def make_child_router(tenant_id: int) -> Router:
             await m.answer("Доступ запрещён.")
             return
         title = await resolve_title(tenant_id, "ru", "admin")
-        await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", _cap_text(title), kb_admin_main())
+        await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", title, kb_admin_main())
 
     @router.callback_query(F.data == "adm:users:search")
     async def adm_users_search(c: CallbackQuery):
@@ -1076,9 +1055,10 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data == "adm:menu")
     async def adm_menu(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         title = await resolve_title(tenant_id, "ru", "admin")
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(title), kb_admin_main())
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", title, kb_admin_main())
         await c.answer()
 
     # ---- Users
@@ -1124,7 +1104,6 @@ def make_child_router(tenant_id: int) -> Router:
                     or_(
                         UserAccess.trader_id.ilike(f"%{q}%"),
                         UserAccess.click_id.ilike(f"%{q}%"),
-                        UserAccess.username.ilike(f"%{q}%"),
                     )
                 ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
             )
@@ -1132,7 +1111,8 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data.startswith("adm:users:"))
     async def adm_users(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         tail = c.data.split(":")[2]
         if tail == "search":
             ADMIN_WAIT[(tenant_id, c.from_user.id)] = "users_search"
@@ -1140,106 +1120,90 @@ def make_child_router(tenant_id: int) -> Router:
             await c.answer()
             return
         page = int(tail)
-        items, more, total = await _fetch_users_page(tenant_id, page)
-        txt = f"👤 Пользователи ({total or 0})\n\nВыберите пользователя:"
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(txt), kb_users_list(items, page, more))
+        await send_users_page(c.bot, tenant_id, c.message.chat.id, page)
         await c.answer()
 
-    async def _user_deposit_sum(tid: int, click_id: str) -> float:
-        return await user_deposit_sum(tid, click_id)
-
-    @router.callback_query(F.data.startswith("adm:user:") & ~F.data.startswith("adm:user:toggle"))
-    async def adm_user_card(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        uid = int(c.data.split(":")[2])
-        async with SessionLocal() as s:
-            res = await s.execute(
-                select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == uid))
-            ua = res.scalar_one_or_none()
-        if not ua:
-            await c.answer("Пользователь не найден", show_alert=True)
+    @router.callback_query(F.data.startswith("adm:user:") & (~F.data.startswith("adm:user:toggle")))
+    async def adm_user_card_cb(c: CallbackQuery):
+        if not await is_owner(tenant_id, c.from_user.id):
             return
-        dep_sum = await _user_deposit_sum(tenant_id, ua.click_id or "")
-        lang = await get_lang(tenant_id, uid)
-        text = (
-            f"🧾 Карточка пользователя\n\n"
-            f"TG ID: <code>{_safe_html(str(ua.user_id))}</code>\n"
-            f"Язык: {lang}\n"
-            f"Click ID: <code>{_safe_html(ua.click_id or '-')}</code>\n"
-            f"Trader ID: <code>{_safe_html(ua.trader_id or '-')}</code>\n"
-            f"Регистрация: {'✅' if ua.is_registered else '❌'}\n"
-            f"Депозит (факт): {'✅' if ua.has_deposit else '❌'}\n"
-            f"Сумма депозитов: {dep_sum:.2f}\n"
-            f"Platinum: {'💠' if ua.is_platinum else '•'}\n"
-            f"Создан: {ua.created_at:%Y-%m-%d %H:%M}\n"
-        )
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(text), kb_user_card(ua))
+        uid = int(c.data.split(":")[2])
+        await send_user_card(c.bot, tenant_id, c.message.chat.id, uid)
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:user:toggle_reg:"))
     async def adm_user_toggle_reg(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         uid = int(c.data.rsplit(":", 1)[1])
         async with SessionLocal() as s:
             res = await s.execute(
                 select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == uid))
             ua = res.scalar_one_or_none()
-            if not ua: await c.answer("Не найден", show_alert=True); return
+            if not ua:
+                await c.answer("Не найден", show_alert=True)
+                return
             newv = not ua.is_registered
             await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(is_registered=newv))
             await s.commit()
         await c.answer("Готово")
-        await adm_user_card(c)
+        await send_user_card(c.bot, tenant_id, c.message.chat.id, uid)
 
     @router.callback_query(F.data.startswith("adm:user:toggle_dep:"))
     async def adm_user_toggle_dep(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         uid = int(c.data.rsplit(":", 1)[1])
         async with SessionLocal() as s:
             res = await s.execute(
                 select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == uid))
             ua = res.scalar_one_or_none()
-            if not ua: await c.answer("Не найден", show_alert=True); return
+            if not ua:
+                await c.answer("Не найден", show_alert=True)
+                return
             newv = not ua.has_deposit
             await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(has_deposit=newv))
             await s.commit()
         await c.answer("Готово")
-        await adm_user_card(c)
+        await send_user_card(c.bot, tenant_id, c.message.chat.id, uid)
 
     @router.callback_query(F.data.startswith("adm:user:toggle_plat:"))
     async def adm_user_toggle_plat(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         uid = int(c.data.rsplit(":", 1)[1])
         async with SessionLocal() as s:
             res = await s.execute(
                 select(UserAccess).where(UserAccess.tenant_id == tenant_id, UserAccess.user_id == uid))
             ua = res.scalar_one_or_none()
-            if not ua: await c.answer("Не найден", show_alert=True); return
+            if not ua:
+                await c.answer("Не найден", show_alert=True)
+                return
             newv = not ua.is_platinum
             await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(is_platinum=newv))
             await s.commit()
         await c.answer("Готово")
-        await adm_user_card(c)
+        await send_user_card(c.bot, tenant_id, c.message.chat.id, uid)
 
     # ---- Postbacks config
     def _postbacks_text(tid: int, secret: Optional[str]) -> str:
         base = settings.POSTBACK_BASE.rstrip("/")
-        sec = f"&secret={_safe_html(secret)}" if secret else ""
+        sec = f"&secret={secret}" if secret else ""
         return (
             "🧷 Настройка постбэков\n\n"
             "Вставьте эти URL в кабинете партнёрки (PocketPartners).\n"
             "Обязательно включите макросы: {click_id}, {trader_id}, {sumdep}.\n\n"
             "<b>Регистрация</b>\n"
-            f"<code>{_safe_html(base)}/pp/reg?click_id={{click_id}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
+            f"<code>{base}/pp/reg?click_id={{click_id}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
             "• click_id → <code>click_id</code>\n"
             "• trader_id → <code>trader_id</code>\n\n"
             "<b>Первый депозит</b>\n"
-            f"<code>{_safe_html(base)}/pp/ftd?click_id={{click_id}}&sumdep={{sumdep}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
+            f"<code>{base}/pp/ftd?click_id={{click_id}}&sumdep={{sumdep}}&trader_id={{trader_id}}&tid={tid}{sec}</code>\n\n"
             "• click_id → <code>click_id</code>\n"
             "• trader_id → <code>trader_id</code>\n"
             "• sumdep → <code>sumdep</code>\n\n"
             "<b>Повторный депозит</b>\n"
-            f"<code>{_safe_html(base)}/pp/rd?click_id={{click_id}}&sumdep={{sumdep}}&tid={tid}{sec}</code>\n"
+            f"<code>{base}/pp/rd?click_id={{click_id}}&sumdep={{sumdep}}&tid={tid}{sec}</code>\n"
             "• click_id → <code>click_id</code>\n"
             "• trader_id → <code>trader_id</code>\n"
             "• sumdep → <code>sumdep</code>\n\n"
@@ -1247,31 +1211,25 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data == "adm:pb")
     async def adm_postbacks(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         tnt = await get_tenant(tenant_id)
         txt = _postbacks_text(tenant_id, tnt.pb_secret)
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(txt), kb_postbacks(tenant_id))
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", txt, kb_postbacks(tenant_id))
         await c.answer()
 
     # ---- Links
     @router.callback_query(F.data == "adm:links")
     async def adm_links(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        tnt = await get_tenant(tenant_id)
-        text = ("🔗 Ссылки\n\n"
-                f"Ref: {tnt.ref_link or '—'}\n"
-                f"Deposit: {tnt.deposit_link or '—'}\n"
-                f"Channel ID: {tnt.gate_channel_id or '—'}\n"
-                f"Channel URL: {tnt.gate_channel_url or '—'}\n"
-                f"Support URL: {tnt.support_url or settings.SUPPORT_URL}\n"
-                f"PB Secret: {tnt.pb_secret or '—'}\n\n"
-                "Выберите, что изменить.")
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(text), kb_links())
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        await show_links_screen(c.bot, tenant_id, c.message.chat.id)
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:links:set:"))
     async def adm_links_set(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         action = c.data.split(":")[-1]
         key = (tenant_id, c.from_user.id)
 
@@ -1279,30 +1237,33 @@ def make_child_router(tenant_id: int) -> Router:
             ADMIN_WAIT[key] = "/set_channel_id"
             await c.message.answer("Пришлите <b>ID канала</b> вида -1001234567890", parse_mode="HTML")
         elif action == "ref":
-            ADMIN_WAIT[key] = "/set_ref_link";
+            ADMIN_WAIT[key] = "/set_ref_link"
             await c.message.answer("Пришлите новую <b>реф-ссылку</b> (https://...)", parse_mode="HTML")
         elif action == "dep":
-            ADMIN_WAIT[key] = "/set_deposit_link";
+            ADMIN_WAIT[key] = "/set_deposit_link"
             await c.message.answer("Пришлите новую <b>ссылку депозита</b> (https://...)", parse_mode="HTML")
         elif action == "support":
-            ADMIN_WAIT[key] = "/set_support_url";
+            ADMIN_WAIT[key] = "/set_support_url"
             await c.message.answer("Пришлите новый <b>Support URL</b> (https://...)", parse_mode="HTML")
         elif action == "pbsec":
-            ADMIN_WAIT[key] = "/set_pb_secret";
+            ADMIN_WAIT[key] = "/set_pb_secret"
             await c.message.answer("Пришлите новый секрет (латиница/цифры), можно «-» чтобы очистить.",
                                    parse_mode="HTML")
         await c.answer()
 
+    # команды-сеттеры
     @router.message(F.text.regexp(r"^/set_channel_id\s+(-?\d{5,})$"))
     async def set_channel_id_cmd(m: Message):
         tnt_ok = await is_owner(tenant_id, m.from_user.id)
-        if not tnt_ok: return
+        if not tnt_ok:
+            return
         ch_id = int(m.text.split()[1])
         async with SessionLocal() as s:
             await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(gate_channel_id=ch_id))
             await s.commit()
         await m.answer(f"gate_channel_id сохранён: {ch_id}")
 
+    # ловим URL’ы
     @router.message(StateFilter(None), F.text.regexp(r"^https?://\S+$"))
     async def admin_catch_url(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
@@ -1319,12 +1280,10 @@ def make_child_router(tenant_id: int) -> Router:
                 await s.commit()
             ADMIN_WAIT.pop(key, None)
             await m.answer("Супер, сохранил ✅")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:links")
-            await adm_links(fake_cb)  # type: ignore[arg-type]
+            await show_links_screen(m.bot, tenant_id, m.chat.id)
             return
 
         col_map = {
-            "/set_channel_url": "gate_channel_url",
             "/set_ref_link": "ref_link",
             "/set_deposit_link": "deposit_link",
             "/set_support_url": "support_url",
@@ -1337,6 +1296,7 @@ def make_child_router(tenant_id: int) -> Router:
             await s.commit()
         ADMIN_WAIT.pop(key, None)
         await m.answer(f"{col} сохранён: {url}")
+        await show_links_screen(m.bot, tenant_id, m.chat.id)
 
     @router.message(StateFilter(None), F.text.regexp(r"^-?\d{5,}$"))
     async def admin_catch_id(m: Message, state: FSMContext):
@@ -1363,6 +1323,7 @@ def make_child_router(tenant_id: int) -> Router:
         if not wait:
             return
 
+        # поиск пользователей
         if wait == "users_search":
             query_raw = m.text.strip()
             ADMIN_WAIT.pop(key, None)
@@ -1391,7 +1352,7 @@ def make_child_router(tenant_id: int) -> Router:
 
             txt = f"🔎 Результаты поиска: {len(items)}"
             kb = kb_users_list(items, page=0, more=False)
-            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", _cap_text(txt), kb)
+            await send_screen(m.bot, tenant_id, m.chat.id, "ru", "admin", txt, kb)
             return
 
         # контент: заголовок
@@ -1400,8 +1361,7 @@ def make_child_router(tenant_id: int) -> Router:
             await upsert_override(tenant_id, lang, screen, title=m.text.strip())
             ADMIN_WAIT.pop(key, None)
             await m.answer("Заголовок сохранён ✅")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
-            await adm_content_edit(fake_cb)  # type: ignore[arg-type]
+            await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
             return
 
         # контент: текст кнопки
@@ -1410,8 +1370,7 @@ def make_child_router(tenant_id: int) -> Router:
             await upsert_override(tenant_id, lang, screen, primary_btn_text=m.text.strip())
             ADMIN_WAIT.pop(key, None)
             await m.answer("Текст кнопки сохранён ✅")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
-            await adm_content_edit(fake_cb)  # type: ignore[arg-type]
+            await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
             return
 
         # параметры: числа
@@ -1428,8 +1387,7 @@ def make_child_router(tenant_id: int) -> Router:
                 await s.commit()
             ADMIN_WAIT.pop(key, None)
             await m.answer("Сохранено ✅")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:params")
-            await adm_params(fake_cb)  # type: ignore[arg-type]
+            await show_params_screen(m.bot, tenant_id, m.chat.id)
             return
 
         # PB secret
@@ -1442,8 +1400,7 @@ def make_child_router(tenant_id: int) -> Router:
                 await s.commit()
             ADMIN_WAIT.pop(key, None)
             await m.answer("PB Secret сохранён.")
-            fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data="adm:links")
-            await adm_links(fake_cb)  # type: ignore[arg-type]
+            await show_links_screen(m.bot, tenant_id, m.chat.id)
 
     # ---- Content editor
     def kb_content_langs() -> InlineKeyboardMarkup:
@@ -1487,45 +1444,39 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data == "adm:content")
     async def adm_content(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin",
-                          "🧩 Редактор контента — выберите язык", kb_content_langs())
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", "🧩 Редактор контента — выберите язык", kb_content_langs())
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:lang:"))
     async def adm_content_lang(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         lang = c.data.split(":")[-1]
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin",
-                          f"Язык: {lang.upper()}\nВыберите экран:", kb_content_screens(lang))
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:", kb_content_screens(lang))
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:list:"))
     async def adm_content_list(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         lang = c.data.split(":")[-1]
-        await adm_content_lang(CallbackQuery(id="0", from_user=c.from_user, message=c.message, data=f"adm:content:lang:{lang}"))  # type: ignore[arg-type]
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:", kb_content_screens(lang))
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:edit:"))
     async def adm_content_edit(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         _, _, _, lang, screen = c.data.split(":")
-        title = await resolve_title(tenant_id, lang, screen)
-        btn_tx = await resolve_primary_btn_text(tenant_id, lang, screen) or "—"
-        img = await resolve_image(tenant_id, lang, screen)
-        text = (
-            f"🧩 Редактор — {screen} ({lang.upper()})\n\n"
-            f"Заголовок: <b>{_safe_html(title)}</b>\n"
-            f"Текст кнопки: <code>{_safe_html(btn_tx)}</code>\n"
-            f"Картинка: {'дефолт' if not img else 'кастом'}"
-        )
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(text), kb_content_editor(lang, screen, {}))
+        await show_content_editor(c.bot, tenant_id, c.message.chat.id, lang, screen)
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:title:"))
     async def adm_content_title(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         _, _, _, lang, screen = c.data.split(":")
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_title:{lang}:{screen}"
         await c.message.answer("Пришлите новый заголовок одним сообщением.")
@@ -1533,7 +1484,8 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data.startswith("adm:content:btn:"))
     async def adm_content_btn(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         _, _, _, lang, screen = c.data.split(":")
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_btn:{lang}:{screen}"
         await c.message.answer("Пришлите новый текст основной кнопки одним сообщением.")
@@ -1541,7 +1493,8 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data.startswith("adm:content:img:"))
     async def adm_content_img(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         _, _, _, lang, screen = c.data.split(":")
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = f"content_img:{lang}:{screen}"
         await c.message.answer("Пришлите картинку изображением (jpg/png) — можно просто переслать фото.")
@@ -1549,12 +1502,14 @@ def make_child_router(tenant_id: int) -> Router:
 
     @router.callback_query(F.data.startswith("adm:content:reset:"))
     async def adm_content_reset(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         _, _, _, lang, screen = c.data.split(":")
         await upsert_override(tenant_id, lang, screen, reset=True)
         await c.answer("Сброшено")
-        await adm_content_edit(c)
+        await show_content_editor(c.bot, tenant_id, c.message.chat.id, lang, screen)
 
+    # --- Контент: ловим фото (и уважаем FSM рассылки)
     @router.message(StateFilter(None), F.photo)
     async def adm_content_catch_image(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
@@ -1563,74 +1518,66 @@ def make_child_router(tenant_id: int) -> Router:
             return
         _, lang, screen = wait.split(":")
         file_id = m.photo[-1].file_id
-        await upsert_override(tenant_id, lang, screen, image_path=file_id)
+        await upsert_override(
+            tenant_id, lang, screen,
+            image_path=file_id, image=file_id, photo_id=file_id, photo_file_id=file_id
+        )
         ADMIN_WAIT.pop(key, None)
         await m.answer("Картинка сохранена ✅")
-        fake_cb = CallbackQuery(id="0", from_user=m.from_user, message=m, data=f"adm:content:edit:{lang}:{screen}")
-        await adm_content_edit(fake_cb)  # type: ignore[arg-type]
+        await show_content_editor(m.bot, tenant_id, m.chat.id, lang, screen)
 
     # ---- Params
-    def kb_params(tnt: Tenant) -> InlineKeyboardMarkup:
-        mark_sub = "✅" if (tnt.check_subscription or tnt.check_subscription is None) else "❌"
-        mark_dep = "✅" if (tnt.check_deposit or tnt.check_deposit is None) else "❌"
-        rows = [
-            [InlineKeyboardButton(text="🔒 Регистрация", callback_data="adm:param:reg_locked")],
-            [
-                InlineKeyboardButton(text=f"{mark_sub} Проверка подписки", callback_data="adm:param:toggle:sub"),
-                InlineKeyboardButton(text=f"💵 Мин. деп: {int(tnt.min_deposit_usd or 0)}$", callback_data="adm:param:set:min_dep"),
-            ],
-            [
-                InlineKeyboardButton(text=f"{mark_dep} Проверка депозита", callback_data="adm:param:toggle:dep"),
-                InlineKeyboardButton(text=f"💠 Порог Platinum: {int(tnt.platinum_threshold_usd or 0)}$", callback_data="adm:param:set:plat"),
-            ],
-            [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
     @router.callback_query(F.data == "adm:params")
     async def adm_params(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
-        tnt = await get_tenant(tenant_id)
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", "⚙️ Параметры", kb_params(tnt))
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        await show_params_screen(c.bot, tenant_id, c.message.chat.id)
         await c.answer()
 
     @router.callback_query(F.data == "adm:param:reg_locked")
     async def adm_param_reg_locked(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         await c.answer("Регистрацию отключать нельзя.", show_alert=True)
 
     @router.callback_query(F.data == "adm:param:toggle:sub")
     async def adm_param_toggle_sub(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         async with SessionLocal() as s:
             res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
             tnt = res.scalar_one()
             newv = not bool(tnt.check_subscription)
             await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(check_subscription=newv))
             await s.commit()
-        await adm_params(c)
+        await show_params_screen(c.bot, tenant_id, c.message.chat.id)
+        await c.answer()
 
     @router.callback_query(F.data == "adm:param:toggle:dep")
     async def adm_param_toggle_dep(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         async with SessionLocal() as s:
             res = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
             tnt = res.scalar_one()
             newv = not bool(tnt.check_deposit)
             await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(check_deposit=newv))
             await s.commit()
-        await adm_params(c)
+        await show_params_screen(c.bot, tenant_id, c.message.chat.id)
+        await c.answer()
 
     @router.callback_query(F.data == "adm:param:set:min_dep")
     async def adm_param_set_min_dep(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = "param:min_dep"
         await c.message.answer("Пришлите новое значение <b>минимального депозита</b> в $ (целое или дробное).", parse_mode="HTML")
         await c.answer()
 
     @router.callback_query(F.data == "adm:param:set:plat")
     async def adm_param_set_plat(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         ADMIN_WAIT[(tenant_id, c.from_user.id)] = "param:plat"
         await c.message.answer("Пришлите новый <b>порог Platinum</b> в $ (целое или дробное).", parse_mode="HTML")
         await c.answer()
@@ -1700,7 +1647,7 @@ def make_child_router(tenant_id: int) -> Router:
         if not (m.text and m.text.strip()):
             await m.answer("Нужен именно текст. Пришлите его одним сообщением.")
             return
-        await state.update_data(text=_cap_text(m.text.strip()))
+        await state.update_data(text=m.text.strip())
         data = await state.get_data()
         await m.answer(
             "Текст сохранён и готов к рассылке. Добавить что-нибудь ещё?",
@@ -1784,10 +1731,10 @@ def make_child_router(tenant_id: int) -> Router:
         video_id = data.get("video_id")
 
         if not seg:
-            await c.answer("Выберите сегмент получателей.", show_alert=True);
+            await c.answer("Выберите сегмент получателей.", show_alert=True)
             return
         if not text:
-            await c.answer("Нужно отправить текст рассылки.", show_alert=True);
+            await c.answer("Нужно отправить текст рассылки.", show_alert=True)
             return
 
         async with SessionLocal() as s:
@@ -1815,11 +1762,11 @@ def make_child_router(tenant_id: int) -> Router:
         for i, uid in enumerate(ids, start=1):
             try:
                 if video_id:
-                    await bot.send_video(uid, video=video_id, caption=_cap_caption(text))
+                    await bot.send_video(uid, video=video_id, caption=text)
                 elif photo_id:
-                    await bot.send_photo(uid, photo=photo_id, caption=_cap_caption(text))
+                    await bot.send_photo(uid, photo=photo_id, caption=text)
                 else:
-                    await bot.send_message(uid, _cap_text(text))
+                    await bot.send_message(uid, text)
                 ok += 1
             except Exception:
                 fail += 1
@@ -1850,7 +1797,8 @@ def make_child_router(tenant_id: int) -> Router:
     # ---- Stats
     @router.callback_query(F.data == "adm:stats")
     async def adm_stats(c: CallbackQuery):
-        if not await is_owner(tenant_id, c.from_user.id): return
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
         async with SessionLocal() as s:
             total = (await s.execute(
                 select(func.count()).select_from(UserAccess).where(UserAccess.tenant_id == tenant_id)
@@ -1881,11 +1829,10 @@ def make_child_router(tenant_id: int) -> Router:
             f"Депозитов: {deps}\n"
             f"Platinum: {plats}"
         )
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", _cap_text(txt), kb_admin_main())
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", txt, kb_admin_main())
         await c.answer()
 
     return router
-
 
 # =========================
 #          Runner
