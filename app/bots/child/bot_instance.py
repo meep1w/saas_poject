@@ -772,14 +772,16 @@ def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🖼 Изменить картинку", callback_data=f"adm:content:img:{lang}:{screen}")],
         [InlineKeyboardButton(text="✏️ Изменить заголовок", callback_data=f"adm:content:title:{lang}:{screen}")],
-        [InlineKeyboardButton(text="📝 Изменить текст экрана", callback_data=f"adm:content:body:{lang}:{screen}")],  # <-- НОВОЕ
+        [InlineKeyboardButton(text="📝 Изменить текст экрана", callback_data=f"adm:content:body:{lang}:{screen}")],
         [InlineKeyboardButton(text="⌨️ Изменить текст кнопки", callback_data=f"adm:content:btn:{lang}:{screen}")],
+        [InlineKeyboardButton(text="🧩 Подписи кнопок (JSON)", callback_data=f"adm:content:btns:{lang}:{screen}")],
         [InlineKeyboardButton(text="♻️ Сбросить к дефолту", callback_data=f"adm:content:reset:{lang}:{screen}")],
         [InlineKeyboardButton(text="📋 Список экранов", callback_data=f"adm:content:list:{lang}")],
         [InlineKeyboardButton(text="🌐 Языки", callback_data="adm:content")],
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 # =========================
