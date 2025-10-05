@@ -158,6 +158,7 @@ ASSETS = {
 }
 ASSETS_DIR = Path("assets")
 
+
 # =========================
 #         Helpers
 # =========================
@@ -408,29 +409,8 @@ async def get_last_bot_message_id(tenant_id: int, chat_id: int) -> Optional[int]
         st = res.scalar_one_or_none()
         return st.last_bot_message_id if st else None
 
+
 # -------- content overrides --------
-
-async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
-    # для совместимости со старым подходом (текст главной большой кнопки)
-    async with SessionLocal() as s:
-        r = await s.execute(
-            select(ContentOverride)
-            .where(ContentOverride.tenant_id == tenant_id,
-                   ContentOverride.lang == lang,
-                   ContentOverride.screen == screen)
-        )
-        ov = r.scalar_one_or_none()
-        if ov and getattr(ov, "primary_btn_text", None):
-            return ov.primary_btn_text
-
-    # дефолтные подписи на случай отсутствия кастома
-    if screen == "menu":
-        return t(lang, "btn_signal")
-    if screen == "howto":
-        return t(lang, "btn_open_app")
-    return None
-
-
 async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
     async with SessionLocal() as s:
         r = await s.execute(
@@ -464,10 +444,48 @@ async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
     return screen
 
 
+def _render_template(src: str, ctx: dict) -> str:
+    def repl(m):
+        key = m.group(1).strip()
+        return str(ctx.get(key, m.group(0)))
+
+    return re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, src or "")
+
+
+async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride)
+            .where(ContentOverride.tenant_id == tenant_id,
+                   ContentOverride.lang == lang,
+                   ContentOverride.screen == screen)
+        )
+        ov = r.scalar_one_or_none()
+        if ov and getattr(ov, "body_html", None):
+            return ov.body_html
+    return None
+
+
+async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    # текст главной кнопки (legacy)
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride)
+            .where(ContentOverride.tenant_id == tenant_id,
+                   ContentOverride.lang == lang,
+                   ContentOverride.screen == screen)
+        )
+        ov = r.scalar_one_or_none()
+        if ov and getattr(ov, "primary_btn_text", None):
+            return ov.primary_btn_text
+    if screen == "menu":
+        return t(lang, "btn_signal")
+    if screen == "howto":
+        return t(lang, "btn_open_app")
+    return None
+
+
 def _pick_override_image_value(ov: ContentOverride) -> Optional[str]:
-    """
-    БЕЗОПАСНО возвращаем значение картинки, учитывая разные возможные имена колонок.
-    """
     for name in ("image_path", "image", "photo_id", "photo_file_id"):
         val = getattr(ov, name, None)
         if val:
@@ -486,28 +504,6 @@ async def resolve_image(tenant_id: int, lang: str, screen: str) -> Optional[str]
         ov = r.scalar_one_or_none()
         if ov:
             return _pick_override_image_value(ov)
-    return None
-
-
-def _render_template(src: str, ctx: dict) -> str:
-    # простая подстановка {{var}}
-    def repl(m):
-        key = m.group(1).strip()
-        return str(ctx.get(key, m.group(0)))
-    return re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, src or "")
-
-
-async def resolve_body(tenant_id: int, lang: str, screen: str) -> Optional[str]:
-    async with SessionLocal() as s:
-        r = await s.execute(
-            select(ContentOverride)
-            .where(ContentOverride.tenant_id == tenant_id,
-                   ContentOverride.lang == lang,
-                   ContentOverride.screen == screen)
-        )
-        ov = r.scalar_one_or_none()
-        if ov and getattr(ov, "body_html", None):
-            return ov.body_html
     return None
 
 
@@ -545,20 +541,18 @@ def _filter_allowed_columns(table, vals: dict) -> dict:
 
 
 async def upsert_override(
-    tenant_id: int,
-    lang: str,
-    screen: str,
-    title: Optional[str] = None,
-    primary_btn_text: Optional[str] = None,
-    # поддерживаем разные возможные имена колонок под картинку
-    image_path: Optional[str] = None,
-    image: Optional[str] = None,
-    photo_id: Optional[str] = None,
-    photo_file_id: Optional[str] = None,
-    # новые поля для полного редактирования экрана
-    body_html: Optional[str] = None,
-    buttons_json: Optional[dict | str] = None,
-    reset: bool = False,
+        tenant_id: int,
+        lang: str,
+        screen: str,
+        title: Optional[str] = None,
+        primary_btn_text: Optional[str] = None,
+        image_path: Optional[str] = None,
+        image: Optional[str] = None,
+        photo_id: Optional[str] = None,
+        photo_file_id: Optional[str] = None,
+        body_html: Optional[str] = None,
+        buttons_json: Optional[dict | str] = None,
+        reset: bool = False,
 ):
     async with SessionLocal() as s:
         r = await s.execute(
@@ -588,7 +582,6 @@ async def upsert_override(
             else:
                 raw_vals["buttons_json"] = json.dumps(buttons_json, ensure_ascii=False)
 
-        # сразу кладём одно и то же значение во все «возможные» поля картинки
         for k, v in {
             "image_path": image_path,
             "image": image or image_path,
@@ -611,15 +604,16 @@ async def upsert_override(
             await s.execute(table.insert().values(**base, **vals))
         await s.commit()
 
+
 # -------- common send --------
 async def send_screen(
-    bot: Bot,
-    tenant_id: int,
-    chat_id: int,
-    lang: str,
-    screen: str,
-    text: str,
-    kb: Optional[InlineKeyboardMarkup],
+        bot: Bot,
+        tenant_id: int,
+        chat_id: int,
+        lang: str,
+        screen: str,
+        text: str,
+        kb: Optional[InlineKeyboardMarkup],
 ):
     last_id = await get_last_bot_message_id(tenant_id, chat_id)
     if last_id:
@@ -644,10 +638,10 @@ async def send_screen(
             else:
                 msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
     except TelegramBadRequest:
-        # Фоллбек на обычное сообщение (слишком длинный caption и т.п.)
         msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
     await set_last_bot_message_id(tenant_id, chat_id, msg.message_id)
+
 
 # -------- metrics --------
 async def user_deposit_sum(tid: int, click_id: str) -> float:
@@ -658,6 +652,7 @@ async def user_deposit_sum(tid: int, click_id: str) -> float:
             )
         )).scalar()
         return float(val or 0.0)
+
 
 # =========================
 #         Keyboards
@@ -698,7 +693,8 @@ def kb_open_app(lang: str, support_url: str, labels: Optional[dict] = None) -> I
     labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=labels.get("open_app", t(lang, "btn_open_app")), web_app=WebAppInfo(url=settings.MINIAPP_URL))],
+            [InlineKeyboardButton(text=labels.get("open_app", t(lang, "btn_open_app")),
+                                  web_app=WebAppInfo(url=settings.MINIAPP_URL))],
             [InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url)],
             [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
@@ -709,14 +705,16 @@ def kb_open_platinum(lang: str, support_url: str, labels: Optional[dict] = None)
     labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))],
+            [InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")),
+                                  web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))],
             [InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url)],
             [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
 
 
-def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict] = None, menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
+def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict] = None,
+            menu_btn_text: Optional[str] = None) -> InlineKeyboardMarkup:
     labels = labels or {}
     direct = acc.has_deposit or acc.is_platinum
     signal_text = menu_btn_text or labels.get("signal", t(lang, "btn_signal"))
@@ -729,7 +727,8 @@ def main_kb(lang: str, acc: UserAccess, support_url: str, labels: Optional[dict]
     ])
     if acc.is_platinum:
         rows.append([
-            InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")), web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))
+            InlineKeyboardButton(text=labels.get("open_vip", t(lang, "btn_open_vip")),
+                                 web_app=WebAppInfo(url=settings.PLATINUM_MINIAPP_URL))
         ])
     else:
         if direct:
@@ -757,7 +756,6 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# Доп: компактная клавиатура howto (сохранена для совместимости; сейчас не используется)
 def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -766,8 +764,9 @@ def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
         ]
     )
 
+
 # =========================
-#   Admin content keyboards (GLOBAL, чтобы не было NameError)
+#   Admin content keyboards
 # =========================
 def kb_content_langs() -> InlineKeyboardMarkup:
     rows = [
@@ -812,6 +811,7 @@ def kb_content_editor(lang: str, screen: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 # =========================
 #        Signal flow
@@ -868,7 +868,8 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             default = t(lang, 'gate_sub_text')
             text = f"<b>{title}</b>\n\n{body or default}"
             btns = await resolve_buttons(tenant_id, lang, "subscribe")
-            await send_screen(bot, tenant_id, chat_id, lang, "subscribe", text, kb_subscribe(lang, tenant.gate_channel_url, btns))
+            await send_screen(bot, tenant_id, chat_id, lang, "subscribe", text,
+                              kb_subscribe(lang, tenant.gate_channel_url, btns))
             asyncio.create_task(_auto_check_after_subscribe(bot, tenant_id, user_id, chat_id, lang))
             return
 
@@ -903,7 +904,6 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
             body = await resolve_body(tenant_id, lang, "deposit")
             default = t(lang, 'gate_dep_text')
 
-            # если есть кастом-тело — поддержим {{need}}, {{total}}, {{remain}}
             ctx = {"need": fmt(need), "total": fmt(total), "remain": fmt(remain)}
             if body:
                 body_text = _render_template(body, ctx)
@@ -987,11 +987,13 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
         main_kb(lang, access, support_url, btn_labels, menu_btn_text)
     )
 
+
 # =========================
 #        Admin section
 # =========================
 ADMIN_WAIT: Dict[Tuple[int, int], str] = {}
 PAGE_SIZE = 8
+
 
 # === GLOBAL: выдача страницы пользователей ===
 async def fetch_users_page(tid: int, page: int):
@@ -1015,26 +1017,21 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
     q = (q or "").strip()
     like = f"%{q}%"
 
-    # Собираем условия
     or_parts = []
 
-    # @username → ищем в UserAccess.username
     if q.startswith("@"):
         name = q[1:]
         or_parts.append(UserAccess.username.ilike(f"%{name}%"))
 
-    # Если есть длинные цифры → пробуем как точный TG ID и как частичное в user_id
     m = re.search(r"\d{5,}", q)
     if m:
         try:
             tg_id = int(m.group(0))
             or_parts.append(UserAccess.user_id == tg_id)
-            # Иногда вводят «обрезки» — добавим частичное сравнение по строке user_id
             or_parts.append(cast(UserAccess.user_id, String).ilike(f"%{m.group(0)}%"))
         except ValueError:
             pass
 
-    # Прямые поля в UserAccess
     or_parts.extend([
         UserAccess.trader_id == q,
         UserAccess.trader_id.ilike(like),
@@ -1043,7 +1040,6 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
         UserAccess.username.ilike(f"%{q.lstrip('@')}%"),
     ])
 
-    # Теперь джойнимся к Event, чтобы искать по trader_id из событий
     async with SessionLocal() as s:
         stmt = (
             select(UserAccess)
@@ -1057,8 +1053,7 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
             .where(
                 or_(
                     *or_parts,
-                    Event.trader_id == q,
-                    Event.trader_id.ilike(like),
+                    getattr(Event, "trader_id", None) == q if hasattr(Event, "trader_id") else False,
                 )
             )
             .order_by(UserAccess.id.desc())
@@ -1067,7 +1062,6 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
         res = await s.execute(stmt)
         items = res.scalars().all()
 
-    # Fallback для случая @username, когда в БД пусто: проверим последние n через Telegram API
     if q.startswith("@") and not items:
         name = q[1:]
         async with SessionLocal() as s:
@@ -1088,7 +1082,6 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
                 pass
         return found
 
-    # Убираем возможные дубликаты (если несколько Event совпали)
     uniq = {}
     for ua in items:
         uniq[ua.user_id] = ua
@@ -1127,9 +1120,9 @@ def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeybo
         )])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm:users:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm:users:{page - 1}"))
     if more:
-        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"adm:users:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"adm:users:{page + 1}"))
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
@@ -1167,7 +1160,8 @@ def kb_postbacks(tenant_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")]
     ])
 
-# ===== helpers to draw admin screens (без фейковых CallbackQuery) =====
+
+# ===== helpers to draw admin screens =====
 async def show_links_screen(bot: Bot, tenant_id: int, chat_id: int):
     tnt = await get_tenant(tenant_id)
     text = ("🔗 Ссылки\n\n"
@@ -1193,11 +1187,13 @@ async def show_params_screen(bot: Bot, tenant_id: int, chat_id: int):
             [InlineKeyboardButton(text="🔒 Регистрация", callback_data="adm:param:reg_locked")],
             [
                 InlineKeyboardButton(text=f"{mark_sub} Проверка подписки", callback_data="adm:param:toggle:sub"),
-                InlineKeyboardButton(text=f"💵 Мин. деп: {int(tnt_.min_deposit_usd or 0)}$", callback_data="adm:param:set:min_dep"),
+                InlineKeyboardButton(text=f"💵 Мин. деп: {int(tnt_.min_deposit_usd or 0)}$",
+                                     callback_data="adm:param:set:min_dep"),
             ],
             [
                 InlineKeyboardButton(text=f"{mark_dep} Проверка депозита", callback_data="adm:param:toggle:dep"),
-                InlineKeyboardButton(text=f"💠 Порог Platinum: {int(tnt_.platinum_threshold_usd or 0)}$", callback_data="adm:param:set:plat"),
+                InlineKeyboardButton(text=f"💠 Порог Platinum: {int(tnt_.platinum_threshold_usd or 0)}$",
+                                     callback_data="adm:param:set:plat"),
             ],
             [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
         ]
@@ -1252,6 +1248,7 @@ async def send_user_card(bot: Bot, tenant_id: int, chat_id: int, uid: int):
         f"Создан: {ua.created_at:%Y-%m-%d %H:%M}\n"
     )
     await send_screen(bot, tenant_id, chat_id, "ru", "admin", text, kb_user_card(ua))
+
 
 # ---- Admin handlers
 def make_child_router(tenant_id: int) -> Router:
@@ -1412,53 +1409,6 @@ def make_child_router(tenant_id: int) -> Router:
         more = (page + 1) * PAGE_SIZE < (total or 0)
         return items, more, total
 
-    async def _search_users(bot: Bot, tid: int, q: str) -> List[UserAccess]:
-        q = (q or "").strip()
-        async with SessionLocal() as s:
-            # 1) @username → ищем в БД по колонке username
-            if q.startswith("@"):
-                u = q[1:].lower()
-                res = await s.execute(
-                    select(UserAccess).where(
-                        UserAccess.tenant_id == tid,
-                        or_(
-                            UserAccess.username.ilike(u),  # точное
-                            UserAccess.username.ilike(f"%{u}%"),  # частичное
-                        )
-                    ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
-                )
-                return res.scalars().all()
-
-            # 2) только цифры → ищем ВЕЗДЕ: TG ID, trader_id, click_id
-            if q.isdigit():
-                res = await s.execute(
-                    select(UserAccess).where(
-                        UserAccess.tenant_id == tid,
-                        or_(
-                            UserAccess.user_id == int(q),
-                            cast(UserAccess.user_id, String).ilike(f"%{q}%"),
-                            UserAccess.trader_id == q,
-                            UserAccess.trader_id.ilike(f"%{q}%"),
-                            UserAccess.click_id.ilike(f"%{q}%"),
-                        )
-                    ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
-                )
-                return res.scalars().all()
-
-            # 3) общий текст → trader_id / click_id / username (частичное)
-            u = q.lstrip("@")
-            res = await s.execute(
-                select(UserAccess).where(
-                    UserAccess.tenant_id == tid,
-                    or_(
-                        UserAccess.trader_id.ilike(f"%{q}%"),
-                        UserAccess.click_id.ilike(f"%{q}%"),
-                        UserAccess.username.ilike(f"%{u}%"),
-                    )
-                ).order_by(UserAccess.id.desc()).limit(PAGE_SIZE)
-            )
-            return res.scalars().all()
-
     @router.callback_query(F.data.startswith("adm:users:"))
     async def adm_users(c: CallbackQuery):
         if not await is_owner(tenant_id, c.from_user.id):
@@ -1601,26 +1551,16 @@ def make_child_router(tenant_id: int) -> Router:
                                    parse_mode="HTML")
         await c.answer()
 
-    # команды-сеттеры
-    @router.message(F.text.regexp(r"^/set_channel_id\s+(-?\d{5,})$"))
-    async def set_channel_id_cmd(m: Message):
-        tnt_ok = await is_owner(tenant_id, m.from_user.id)
-        if not tnt_ok:
-            return
-        ch_id = int(m.text.split()[1])
-        async with SessionLocal() as s:
-            await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(gate_channel_id=ch_id))
-            await s.commit()
-        await m.answer(f"gate_channel_id сохранён: {ch_id}")
-
-    # ловим URL’ы
-    @router.message(StateFilter(None), F.text.regexp(r"^https?://\S+$"))
+    # --- ловим URL’ы (ТОЛЬКО когда ждём один из сеттеров URL)
+    @router.message(
+        StateFilter(None),
+        F.text.regexp(r"^https?://\S+$"),
+        lambda m: ADMIN_WAIT.get((tenant_id, m.from_user.id)) in {"/set_channel_url", "/set_ref_link",
+                                                                  "/set_deposit_link", "/set_support_url"}
+    )
     async def admin_catch_url(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
         cmd = ADMIN_WAIT.get(key)
-        if not cmd:
-            return
-
         url = m.text.strip()
         if cmd == "/set_channel_url":
             async with SessionLocal() as s:
@@ -1648,13 +1588,14 @@ def make_child_router(tenant_id: int) -> Router:
         await m.answer(f"{col} сохранён: {url}")
         await show_links_screen(m.bot, tenant_id, m.chat.id)
 
-    @router.message(StateFilter(None), F.text.regexp(r"^-?\d{5,}$"))
+    # --- ловим ID канала (ТОЛЬКО когда ждём /set_channel_id)
+    @router.message(
+        StateFilter(None),
+        F.text.regexp(r"^-?\d{5,}$"),
+        lambda m: ADMIN_WAIT.get((tenant_id, m.from_user.id)) == "/set_channel_id"
+    )
     async def admin_catch_id(m: Message, state: FSMContext):
         key = (tenant_id, m.from_user.id)
-        cmd = ADMIN_WAIT.get(key)
-        if cmd != "/set_channel_id":
-            return
-
         ch_id = int(m.text.strip())
         async with SessionLocal() as s:
             await s.execute(Tenant.__table__.update()
@@ -1681,7 +1622,6 @@ def make_child_router(tenant_id: int) -> Router:
 
             if not items:
                 await m.answer("Ничего не нашёл по этому запросу.")
-                # Вернёмся к списку, чтобы не зависать
                 await send_users_page(m.bot, tenant_id, m.chat.id, page=0)
                 return
 
@@ -1766,12 +1706,13 @@ def make_child_router(tenant_id: int) -> Router:
             await m.answer("PB Secret сохранён.")
             await show_links_screen(m.bot, tenant_id, m.chat.id)
 
-    # ---- Content editor callbacks (используют GLOBAL клавиатуры)
+    # ---- Content editor callbacks
     @router.callback_query(F.data == "adm:content")
     async def adm_content(c: CallbackQuery):
         if not await is_owner(tenant_id, c.from_user.id):
             return
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", "🧩 Редактор контента — выберите язык", kb_content_langs())
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", "🧩 Редактор контента — выберите язык",
+                          kb_content_langs())
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:lang:"))
@@ -1779,7 +1720,8 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         lang = c.data.split(":")[-1]
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:", kb_content_screens(lang))
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:",
+                          kb_content_screens(lang))
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:list:"))
@@ -1787,7 +1729,8 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         lang = c.data.split(":")[-1]
-        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:", kb_content_screens(lang))
+        await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", f"Язык: {lang.upper()}\nВыберите экран:",
+                          kb_content_screens(lang))
         await c.answer()
 
     @router.callback_query(F.data.startswith("adm:content:edit:"))
@@ -1831,13 +1774,13 @@ def make_child_router(tenant_id: int) -> Router:
             return
         _, _, _, lang, screen = c.data.split(":")
         keys_map = {
-            "menu": ["howto","support","lang","open_app","open_vip","signal"],
-            "subscribe": ["subscribe","check","back"],
-            "register": ["register","back"],
-            "deposit": ["deposit","back"],
-            "howto": ["open_app","support","back"],
-            "unlocked": ["open_app","support","back"],
-            "platinum": ["open_vip","support","back"],
+            "menu": ["howto", "support", "lang", "open_app", "open_vip", "signal"],
+            "subscribe": ["subscribe", "check", "back"],
+            "register": ["register", "back"],
+            "deposit": ["deposit", "back"],
+            "howto": ["open_app", "support", "back"],
+            "unlocked": ["open_app", "support", "back"],
+            "platinum": ["open_vip", "support", "back"],
             "lang": ["back"],
             "admin": ["back"],
         }
