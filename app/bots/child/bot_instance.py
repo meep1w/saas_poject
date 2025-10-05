@@ -409,6 +409,28 @@ async def get_last_bot_message_id(tenant_id: int, chat_id: int) -> Optional[int]
         return st.last_bot_message_id if st else None
 
 # -------- content overrides --------
+
+async def resolve_primary_btn_text(tenant_id: int, lang: str, screen: str) -> Optional[str]:
+    # для совместимости со старым подходом (текст главной большой кнопки)
+    async with SessionLocal() as s:
+        r = await s.execute(
+            select(ContentOverride)
+            .where(ContentOverride.tenant_id == tenant_id,
+                   ContentOverride.lang == lang,
+                   ContentOverride.screen == screen)
+        )
+        ov = r.scalar_one_or_none()
+        if ov and getattr(ov, "primary_btn_text", None):
+            return ov.primary_btn_text
+
+    # дефолтные подписи на случай отсутствия кастома
+    if screen == "menu":
+        return t(lang, "btn_signal")
+    if screen == "howto":
+        return t(lang, "btn_open_app")
+    return None
+
+
 async def resolve_title(tenant_id: int, lang: str, screen: str) -> str:
     async with SessionLocal() as s:
         r = await s.execute(
