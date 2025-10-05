@@ -611,14 +611,19 @@ async def send_screen(
     if custom:
         p = Path(custom)
         photo = FSInputFile(str(p)) if p.exists() else custom
-    if photo:
-        msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
-    else:
-        p = asset_for(lang, screen)
-        if p and p.exists():
-            msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
+
+    try:
+        if photo:
+            msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
         else:
-            msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+            p = asset_for(lang, screen)
+            if p and p.exists():
+                msg = await bot.send_photo(chat_id, photo=FSInputFile(str(p)), caption=text, reply_markup=kb)
+            else:
+                msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+    except TelegramBadRequest as e:
+        # Фоллбек на обычное сообщение (слишком длинный caption и т.п.)
+        msg = await bot.send_message(chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
     await set_last_bot_message_id(tenant_id, chat_id, msg.message_id)
 
