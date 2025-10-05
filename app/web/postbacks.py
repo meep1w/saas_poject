@@ -53,12 +53,17 @@ async def _get_tenant(tid: int) -> Optional[Tenant]:
 
 
 async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
+    """
+    Сохраняем сырое событие. ВАЖНО: записываем trader_id из params,
+    чтобы поиск мог идти по Event.trader_id.
+    """
     raw = urlencode({k: "" if v is None else v for k, v in params.items()})
     async with SessionLocal() as s:
         await s.execute(Event.__table__.insert().values(
             tenant_id=(ua.tenant_id if ua else None),
             user_id=(ua.user_id if ua else None),
             click_id=(ua.click_id if ua else params.get("click_id")),
+            trader_id=params.get("trader_id"),  # <-- добавлено
             kind=kind,
             amount=float(params.get("sumdep")) if params.get("sumdep") not in (None, "") else None,
             raw_qs=raw,
@@ -93,7 +98,6 @@ async def _push_next_screen(ua_id: int):
             return
 
         # если проверка депозита включена — проверим минимум
-        # стало
         if tenant.check_deposit:
             total = await user_deposit_sum(ua.tenant_id, ua.click_id)
             need = float(tenant.min_deposit_usd or 0.0)
@@ -208,7 +212,8 @@ async def pp_ftd(
         await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(**vals))
         await s.commit()
 
-    await _log_event("ftd", ua, {"click_id": click_id, "sumdep": sumdep, "tid": tenant_id})
+    # лог с пробросом trader_id
+    await _log_event("ftd", ua, {"click_id": click_id, "sumdep": sumdep, "tid": tenant_id, "trader_id": trader_id})
 
     # platinum check
     tnt = await _get_tenant(tenant_id)
@@ -232,6 +237,7 @@ async def pp_ftd(
 async def pp_rd(
     click_id: str = Query(...),
     sumdep: Optional[float] = None,
+    trader_id: Optional[str] = None,  # <-- добавлено
     tid: Optional[int] = None,
     secret: Optional[str] = None,
 ):
@@ -245,10 +251,14 @@ async def pp_rd(
 
     new_count = (ua.total_deposits or 0) + 1
     async with SessionLocal() as s:
-        await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(total_deposits=new_count))
+        vals = {"total_deposits": new_count}
+        if trader_id and not ua.trader_id:
+            vals["trader_id"] = trader_id
+        await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(**vals))
         await s.commit()
 
-    await _log_event("rd", ua, {"click_id": click_id, "sumdep": sumdep, "tid": tenant_id})
+    # лог с пробросом trader_id
+    await _log_event("rd", ua, {"click_id": click_id, "sumdep": sumdep, "tid": tenant_id, "trader_id": trader_id})
 
     # platinum check
     tnt = await _get_tenant(tenant_id)

@@ -280,6 +280,15 @@ async def ensure_click_id(tenant_id: int, user_id: int) -> str:
         await s.commit()
         return cid
 
+async def set_trader_id_for_click(tenant_id: int, click_id: str, trader_id: str):
+    async with SessionLocal() as s:
+        await s.execute(
+            UserAccess.__table__.update()
+            .where(UserAccess.tenant_id == tenant_id, UserAccess.click_id == click_id)
+            .values(trader_id=trader_id)
+        )
+        await s.commit()
+
 async def get_lang(tenant_id: int, user_id: int) -> str:
     async with SessionLocal() as s:
         res = await s.execute(
@@ -983,30 +992,69 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
     q = (q or "").strip()
     like = f"%{q}%"
 
-    # @username
+    # Собираем условия
+    or_parts = []
+
+    # @username → ищем в UserAccess.username
     if q.startswith("@"):
         name = q[1:]
-        async with SessionLocal() as s:
-            res = await s.execute(
-                select(UserAccess)
-                .where(UserAccess.tenant_id == tid,
-                       UserAccess.username.ilike(f"%{name}%"))
-                .order_by(UserAccess.id.desc())
-                .limit(50)
-            )
-            items = res.scalars().all()
-        if items:
-            return items
+        or_parts.append(UserAccess.username.ilike(f"%{name}%"))
 
-        # запасной вариант: пробегаем последние 200 и сверяем username через API
+    # Если есть длинные цифры → пробуем как точный TG ID и как частичное в user_id
+    m = re.search(r"\d{5,}", q)
+    if m:
+        try:
+            tg_id = int(m.group(0))
+            or_parts.append(UserAccess.user_id == tg_id)
+            # Иногда вводят «обрезки» — добавим частичное сравнение по строке user_id
+            or_parts.append(cast(UserAccess.user_id, String).ilike(f"%{m.group(0)}%"))
+        except ValueError:
+            pass
+
+    # Прямые поля в UserAccess
+    or_parts.extend([
+        UserAccess.trader_id == q,
+        UserAccess.trader_id.ilike(like),
+        UserAccess.click_id == q,
+        UserAccess.click_id.ilike(like),
+        UserAccess.username.ilike(f"%{q.lstrip('@')}%"),
+    ])
+
+    # Теперь джойнимся к Event, чтобы искать по trader_id из событий
+    async with SessionLocal() as s:
+        stmt = (
+            select(UserAccess)
+            .join(
+                Event,
+                (Event.tenant_id == UserAccess.tenant_id) &
+                (Event.click_id == UserAccess.click_id),
+                isouter=True
+            )
+            .where(UserAccess.tenant_id == tid)
+            .where(
+                or_(
+                    *or_parts,
+                    Event.trader_id == q,
+                    Event.trader_id.ilike(like),
+                )
+            )
+            .order_by(UserAccess.id.desc())
+            .limit(50)
+        )
+        res = await s.execute(stmt)
+        items = res.scalars().all()
+
+    # Fallback для случая @username, когда в БД пусто: проверим последние n через Telegram API
+    if q.startswith("@") and not items:
+        name = q[1:]
         async with SessionLocal() as s:
-            res = await s.execute(
+            pool_res = await s.execute(
                 select(UserAccess)
                 .where(UserAccess.tenant_id == tid)
                 .order_by(UserAccess.id.desc())
                 .limit(200)
             )
-            pool = res.scalars().all()
+            pool = pool_res.scalars().all()
         found = []
         for ua in pool:
             try:
@@ -1017,32 +1065,12 @@ async def _find_users_by_query(bot: Bot, tid: int, q: str) -> List[UserAccess]:
                 pass
         return found
 
-    # числа → пробуем как TG ID и как trader_id
-    m = re.search(r"\d{5,}", q)
-    or_parts = []
-    if m:
-        try:
-            tg_id = int(m.group(0))
-            or_parts.append(UserAccess.user_id == tg_id)
-        except ValueError:
-            pass
+    # Убираем возможные дубликаты (если несколько Event совпали)
+    uniq = {}
+    for ua in items:
+        uniq[ua.user_id] = ua
+    return list(uniq.values())
 
-    # trader_id, click_id, username (без @), а также подстрока
-    or_parts.extend([
-        UserAccess.trader_id == q,
-        UserAccess.trader_id.ilike(like),
-        UserAccess.click_id.ilike(like),
-        UserAccess.username.ilike(f"%{q.lstrip('@')}%"),
-    ])
-
-    async with SessionLocal() as s:
-        res = await s.execute(
-            select(UserAccess)
-            .where(UserAccess.tenant_id == tid, or_(*or_parts))
-            .order_by(UserAccess.id.desc())
-            .limit(50)
-        )
-        return res.scalars().all()
 
 
 def kb_admin_main() -> InlineKeyboardMarkup:
@@ -1064,8 +1092,14 @@ def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeybo
         mark_r = "✅" if ua.is_registered else "❌"
         mark_d = "✅" if ua.has_deposit else "❌"
         mark_p = "💠" if ua.is_platinum else "•"
+        tail = []
+        if ua.trader_id:
+            tail.append(f"TR:{ua.trader_id}")
+        if ua.click_id:
+            tail.append(f"CL:{ua.click_id[:8]}…")
+        extra = ("  " + " ".join(tail)) if tail else ""
         rows.append([InlineKeyboardButton(
-            text=f"{ua.user_id}  R:{mark_r}  D:{mark_d}  {mark_p}",
+            text=f"{ua.user_id}{extra}  R:{mark_r}  D:{mark_d}  {mark_p}",
             callback_data=f"adm:user:{ua.user_id}"
         )])
     nav = []
@@ -1077,6 +1111,7 @@ def kb_users_list(items: List[UserAccess], page: int, more: bool) -> InlineKeybo
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def kb_user_card(ua: UserAccess) -> InlineKeyboardMarkup:
     rows = [
