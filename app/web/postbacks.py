@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import asyncio
 import secrets as _pysecrets
 from datetime import datetime
 from typing import Optional
@@ -86,7 +87,7 @@ async def _get_tenant(tid: int) -> Optional[Tenant]:
 
 async def _ensure_pb_secret(tenant_id: int) -> str:
     """
-    Лениво генерим pb_secret, если пустой. Возвращаем актуальный секрет.
+    Лениво генерируем pb_secret, если пустой. Возвращаем актуальный секрет.
     """
     async with SessionLocal() as s:
         r = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -123,6 +124,36 @@ async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
         await s.commit()
 
 
+# Надёжная отправка экрана с ретраем и логами
+async def _safe_send_screen(
+    *, screen: str, bot: Bot, tenant_id: int, chat_id: int,
+    click_id: str | None, lang: str, text: str, kb
+):
+    last_exc = None
+    for _ in range(2):  # две попытки
+        try:
+            await send_screen(bot, tenant_id, chat_id, lang, screen, text, kb)
+            try:
+                await _log_event("push_sent", None, {
+                    "click_id": click_id or str(chat_id),
+                    "screen": screen, "ok": "1"
+                })
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            last_exc = e
+            await asyncio.sleep(0.6)
+    try:
+        await _log_event("push_error", None, {
+            "click_id": click_id or str(chat_id),
+            "screen": screen, "err": str(last_exc)
+        })
+    except Exception:
+        pass
+    raise last_exc
+
+
 async def _push_next_screen(ua_id: int):
     """
     Пушим следующий “шаг” пользователю (после входящего постбэка).
@@ -143,10 +174,11 @@ async def _push_next_screen(ua_id: int):
         # если ещё не регистрирован — покажем регистрацию
         if not ua.is_registered:
             ref_url = add_params(tenant.ref_link or settings.REF_LINK, click_id=ua.click_id, tid=ua.tenant_id)
-            await send_screen(
-                bot, ua.tenant_id, chat_id, lang, "register",
-                f"<b>{t(lang,'gate_reg_title')}</b>\n\n{t(lang,'gate_reg_text')}",
-                kb_register(lang, ref_url)
+            await _safe_send_screen(
+                screen="register", bot=bot, tenant_id=ua.tenant_id, chat_id=chat_id,
+                click_id=ua.click_id, lang=lang,
+                text=f"<b>{t(lang,'gate_reg_title')}</b>\n\n{t(lang,'gate_reg_text')}",
+                kb=kb_register(lang, ref_url)
             )
             return
 
@@ -178,31 +210,36 @@ async def _push_next_screen(ua_id: int):
                                      click_id=ua.click_id, tid=ua.tenant_id)
                 text = (f"<b>{t(lang, 'gate_dep_title')}</b>\n\n"
                         f"{t(lang, 'gate_dep_text')}{hints.get(lang, hints['en'])}")
-                await send_screen(bot, ua.tenant_id, chat_id, lang, "deposit", text, kb_deposit(lang, dep_url))
+                await _safe_send_screen(
+                    screen="deposit", bot=bot, tenant_id=ua.tenant_id, chat_id=chat_id,
+                    click_id=ua.click_id, lang=lang, text=text, kb=kb_deposit(lang, dep_url)
+                )
                 return
 
-        # platinum
+        # platinum экран
         if ua.is_platinum and not ua.platinum_shown:
-            await send_screen(
-                bot, ua.tenant_id, chat_id, lang, "platinum",
-                f"<b>{t(lang,'platinum_title')}</b>\n\n{t(lang,'platinum_text')}",
-                kb_open_platinum(lang, support_url)
+            await _safe_send_screen(
+                screen="platinum", bot=bot, tenant_id=ua.tenant_id, chat_id=chat_id,
+                click_id=ua.click_id, lang=lang,
+                text=f"<b>{t(lang,'platinum_title')}</b>\n\n{t(lang,'platinum_text')}",
+                kb=kb_open_platinum(lang, support_url)
             )
             await mark_platinum_shown(ua.tenant_id, ua.user_id)
             return
 
         # доступ открыт
         if not ua.unlocked_shown:
-            await send_screen(
-                bot, ua.tenant_id, chat_id, lang, "unlocked",
-                f"<b>{t(lang,'unlocked_title')}</b>\n\n{t(lang,'unlocked_text')}",
-                kb_open_app(lang, support_url)
+            await _safe_send_screen(
+                screen="unlocked", bot=bot, tenant_id=ua.tenant_id, chat_id=chat_id,
+                click_id=ua.click_id, lang=lang,
+                text=f"<b>{t(lang,'unlocked_title')}</b>\n\n{t(lang,'unlocked_text')}",
+                kb=kb_open_app(lang, support_url)
             )
             await mark_unlocked_shown(ua.tenant_id, ua.user_id)
             return
 
     except Exception as e:
-        # логируем фатал при пуше шага, чтобы видеть проблемы доставки
+        # На всякий случай продублируем лог ошибки
         try:
             await _log_event("push_error", ua, {"click_id": ua.click_id, "err": str(e)})
         except Exception:
@@ -268,7 +305,6 @@ async def pp_ftd(
         return _nf(click_id=click_id)
     tenant_id = tid or ua.tenant_id
     if not await _check_secret(tenant_id, secret):
-        # логируем даже при bad_secret для диагностики
         eff_sum = sumdep or sum_alt or amount_alt
         await _log_event("ftd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id, "secret": secret})
         return _err("bad_secret")
