@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets as _pysecrets
 from datetime import datetime
 from typing import Optional
 
@@ -83,6 +84,25 @@ async def _get_tenant(tid: int) -> Optional[Tenant]:
         return r.scalar_one_or_none()
 
 
+async def _ensure_pb_secret(tenant_id: int) -> str:
+    """
+    Лениво генерим pb_secret, если пустой. Возвращаем актуальный секрет.
+    """
+    async with SessionLocal() as s:
+        r = await s.execute(select(Tenant).where(Tenant.id == tenant_id))
+        tnt = r.scalar_one()
+        if not tnt.pb_secret:
+            new_secret = _pysecrets.token_urlsafe(20)  # ~27 символов, URL-safe
+            await s.execute(
+                Tenant.__table__.update()
+                .where(Tenant.id == tenant_id)
+                .values(pb_secret=new_secret)
+            )
+            await s.commit()
+            return new_secret
+        return tnt.pb_secret
+
+
 async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
     """
     Сохраняем сырое событие. Пишем trader_id и корректно парсим сумму.
@@ -130,8 +150,8 @@ async def _push_next_screen(ua_id: int):
             )
             return
 
-        # если проверка депозита включена — проверим минимум
-        if tenant.check_deposit:
+        # если проверка депозита включена — проверим минимум (None = включено)
+        if tenant.check_deposit is not False:
             total = await user_deposit_sum(ua.tenant_id, ua.click_id)
             need = float(tenant.min_deposit_usd or 0.0)
             if total < need:
@@ -180,17 +200,27 @@ async def _push_next_screen(ua_id: int):
             )
             await mark_unlocked_shown(ua.tenant_id, ua.user_id)
             return
+
+    except Exception as e:
+        # логируем фатал при пуше шага, чтобы видеть проблемы доставки
+        try:
+            await _log_event("push_error", ua, {"click_id": ua.click_id, "err": str(e)})
+        except Exception:
+            pass
+        raise
     finally:
         await bot.session.close()
 
 
 async def _check_secret(tenant_id: int, secret: Optional[str]) -> bool:
+    """
+    Секрет обязателен у всех: если пуст — генерим, затем сравниваем строго.
+    """
     tnt = await _get_tenant(tenant_id)
     if not tnt:
         return False
-    if not tnt.pb_secret:  # секрет отключён — пропускаем проверку
-        return True
-    return secret == tnt.pb_secret
+    must = tnt.pb_secret or await _ensure_pb_secret(tenant_id)
+    return secret == must
 
 
 # =========================

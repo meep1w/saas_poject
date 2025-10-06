@@ -869,8 +869,8 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
 
     support_url = tenant.support_url or settings.SUPPORT_URL
 
-    # 1) Подписка (если включена)
-    if tenant.check_subscription:
+    # 1) Подписка (если включена: None = включено)
+    if tenant.check_subscription is not False:
         if not await check_membership(bot, tenant.gate_channel_id, user_id):
             title = await resolve_title(tenant_id, lang, "subscribe")
             body = await resolve_body(tenant_id, lang, "subscribe")
@@ -895,8 +895,8 @@ async def route_signal(bot: Bot, tenant_id: int, user_id: int, chat_id: int, lan
         await send_screen(bot, tenant_id, chat_id, lang, "register", text, kb_register(lang, ref_url, btns))
         return
 
-    # 3) Депозит
-    if tenant.check_deposit:
+    # 3) Депозит (если включена проверка: None = включено)
+    if tenant.check_deposit is not False:
         dep = tenant.deposit_link or settings.DEPOSIT_LINK
         dep_url = add_params(dep, click_id=cid, tid=tenant_id)
 
@@ -1158,7 +1158,7 @@ def kb_links() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Изменить ссылку депоз.", callback_data="adm:links:set:dep")],
         [InlineKeyboardButton(text="Изменить канал (ID → URL)", callback_data="adm:links:set:chan")],
         [InlineKeyboardButton(text="Изменить Support URL", callback_data="adm:links:set:support")],
-        [InlineKeyboardButton(text="Задать PB Secret", callback_data="adm:links:set:pbsec")],
+        [InlineKeyboardButton(text="🔐 Сгенерировать новый PB Secret", callback_data="adm:links:regen:pbsec")],
         [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1173,6 +1173,19 @@ def kb_postbacks(tenant_id: int) -> InlineKeyboardMarkup:
 # ===== helpers to draw admin screens =====
 async def show_links_screen(bot: Bot, tenant_id: int, chat_id: int):
     tnt = await get_tenant(tenant_id)
+    # если секрет пуст — генерируем сразу, чтобы всегда показывать готовые URL
+    if not tnt.pb_secret:
+        import secrets as _pysecrets
+        async with SessionLocal() as s:
+            new_secret = _pysecrets.token_urlsafe(20)
+            await s.execute(
+                Tenant.__table__.update()
+                .where(Tenant.id == tenant_id)
+                .values(pb_secret=new_secret)
+            )
+            await s.commit()
+        tnt = await get_tenant(tenant_id)
+
     text = ("🔗 Ссылки\n\n"
             f"Ref: {tnt.ref_link or '—'}\n"
             f"Deposit: {tnt.deposit_link or '—'}\n"
@@ -1244,9 +1257,13 @@ async def send_user_card(bot: Bot, tenant_id: int, chat_id: int, uid: int):
         return
     dep_sum = await user_deposit_sum(tenant_id, ua.click_id or "")
     lang = await get_lang(tenant_id, uid)
+    username_line = (
+        f'<a href="https://t.me/{ua.username}">@{ua.username}</a>' if ua.username else "—"
+    )
     text = (
         f"🧾 Карточка пользователя\n\n"
         f"TG ID: <code>{ua.user_id}</code>\n"
+        f"Username: {username_line}\n"
         f"Язык: {lang}\n"
         f"Click ID: <code>{ua.click_id or '-'}</code>\n"
         f"Trader ID: <code>{ua.trader_id or '-'}</code>\n"
@@ -1537,6 +1554,14 @@ def make_child_router(tenant_id: int) -> Router:
         if not await is_owner(tenant_id, c.from_user.id):
             return
         tnt = await get_tenant(tenant_id)
+        # гарантируем наличие секрета
+        if not tnt.pb_secret:
+            import secrets as _pysecrets
+            async with SessionLocal() as s:
+                new_secret = _pysecrets.token_urlsafe(20)
+                await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(pb_secret=new_secret))
+                await s.commit()
+            tnt = await get_tenant(tenant_id)
         txt = _postbacks_text(tenant_id, tnt.pb_secret)
         await send_screen(c.bot, tenant_id, c.message.chat.id, "ru", "admin", txt, kb_postbacks(tenant_id))
         await c.answer()
@@ -1568,10 +1593,23 @@ def make_child_router(tenant_id: int) -> Router:
         elif action == "support":
             ADMIN_WAIT[key] = "/set_support_url"
             await c.message.answer("Пришлите новый <b>Support URL</b> (https://...)", parse_mode="HTML")
-        elif action == "pbsec":
-            ADMIN_WAIT[key] = "/set_pb_secret"
-            await c.message.answer("Пришлите новый секрет (латиница/цифры), можно «-» чтобы очистить.",
-                                   parse_mode="HTML")
+        await c.answer()
+
+    @router.callback_query(F.data == "adm:links:regen:pbsec")
+    async def adm_links_regen_pbsec(c: CallbackQuery):
+        if not await is_owner(tenant_id, c.from_user.id):
+            return
+        import secrets as _pysecrets
+        async with SessionLocal() as s:
+            new_secret = _pysecrets.token_urlsafe(20)
+            await s.execute(
+                Tenant.__table__.update()
+                .where(Tenant.id == tenant_id)
+                .values(pb_secret=new_secret)
+            )
+            await s.commit()
+        await c.message.answer("✅ Новый PB Secret сгенерирован.\nНе забудьте обновить URL'ы в партнёрке.")
+        await show_links_screen(c.bot, tenant_id, c.message.chat.id)
         await c.answer()
 
     # --- ловим URL’ы (ТОЛЬКО когда ждём один из сеттеров URL)
@@ -1716,18 +1754,6 @@ def make_child_router(tenant_id: int) -> Router:
             await m.answer("Сохранено ✅")
             await show_params_screen(m.bot, tenant_id, m.chat.id)
             return
-
-        # PB secret
-        if wait == "/set_pb_secret":
-            val = m.text.strip()
-            if val == "-":
-                val = None
-            async with SessionLocal() as s:
-                await s.execute(Tenant.__table__.update().where(Tenant.id == tenant_id).values(pb_secret=val))
-                await s.commit()
-            ADMIN_WAIT.pop(key, None)
-            await m.answer("PB Secret сохранён.")
-            await show_links_screen(m.bot, tenant_id, m.chat.id)
 
     # ---- Content editor callbacks
     @router.callback_query(F.data == "adm:content")
@@ -1995,8 +2021,8 @@ def make_child_router(tenant_id: int) -> Router:
 
         await state.update_data(
             text=text_html,
-            fmt="HTML",  # чтобы потом отправлять с parse_mode=HTML
-            disable_preview=False  # или True, если хотите отключать предпросмотр ссылок
+            fmt="HTML",
+            disable_preview=False
         )
 
         data = await state.get_data()
@@ -2168,7 +2194,6 @@ def make_child_router(tenant_id: int) -> Router:
         for i, uid in enumerate(ids, start=1):
             try:
                 if video_id:
-                    # caption поддерживает parse_mode
                     await bot.send_video(uid, video=video_id, caption=text, parse_mode=fmt)
                 elif photo_id:
                     await bot.send_photo(uid, photo=photo_id, caption=text, parse_mode=fmt)
