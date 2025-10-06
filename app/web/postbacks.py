@@ -106,22 +106,31 @@ async def _ensure_pb_secret(tenant_id: int) -> str:
 
 async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
     """
-    Сохраняем сырое событие. Пишем trader_id и корректно парсим сумму.
+    Сохраняем сырое событие. Пишем trader_id (если колонка есть) и корректно парсим сумму.
     """
     raw = urlencode({k: "" if v is None else v for k, v in params.items()})
     amt = _parse_amount(params.get("sumdep"))
+
+    # вычисляем допустимые колонки
+    cols = {c.name for c in Event.__table__.columns}
+
+    values = {
+        "tenant_id": (ua.tenant_id if ua else None),
+        "user_id": (ua.user_id if ua else None),
+        "click_id": (ua.click_id if ua else params.get("click_id")),
+        "kind": kind,
+        "amount": amt,
+        "raw_qs": raw,
+        "created_at": datetime.utcnow(),
+    }
+    # аккуратно добавляем trader_id, только если колонка существует
+    if "trader_id" in cols:
+        values["trader_id"] = params.get("trader_id")
+
     async with SessionLocal() as s:
-        await s.execute(Event.__table__.insert().values(
-            tenant_id=(ua.tenant_id if ua else None),
-            user_id=(ua.user_id if ua else None),
-            click_id=(ua.click_id if ua else params.get("click_id")),
-            trader_id=params.get("trader_id"),
-            kind=kind,
-            amount=amt,
-            raw_qs=raw,
-            created_at=datetime.utcnow(),
-        ))
+        await s.execute(Event.__table__.insert().values(**values))
         await s.commit()
+
 
 
 # Надёжная отправка экрана с ретраем и логами
