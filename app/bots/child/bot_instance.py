@@ -1388,12 +1388,11 @@ def make_child_router(tenant_id: int) -> Router:
         title = await resolve_title(tenant_id, lang, "howto")
         body_override = await resolve_body(tenant_id, lang, "howto")
         body_default = build_howto_text(lang, ref)
-        body = (body_override or body_default)
-        body = _render_template(body, {"ref": _render_ref_anchor(ref)})
-        buttons = await resolve_buttons(tenant_id, lang, "howto")
+        body = _render_template(body_override or body_default, {"ref": _render_ref_anchor(ref)})
 
         text = f"<b>{title}</b>\n\n{body}"
-        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_open_app(lang, sup, buttons))
+        # было: kb_open_app(lang, sup, buttons)
+        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_howto_min(lang, sup))
         await c.answer()
 
     @router.callback_query(F.data == "signal")
