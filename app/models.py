@@ -93,14 +93,16 @@ class UserAccess(Base):
     platinum_shown = mapped_column(Boolean, default=False)
 
 class Event(Base):
-    """Сырые события от постбэков для аналитики по каждому тенанту."""
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(Integer, index=True)
     user_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     click_id: Mapped[str] = mapped_column(String(64), index=True)
-    kind: Mapped[str] = mapped_column(String(16))            # "reg" | "ftd" | "rd"
+    # ➕ добавляем trader_id
+    trader_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    kind: Mapped[str] = mapped_column(String(16))  # "reg" | "ftd" | "rd"
     amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_qs: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
