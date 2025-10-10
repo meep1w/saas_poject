@@ -5,13 +5,13 @@ import asyncio
 import secrets as _pysecrets
 from datetime import datetime
 from typing import Optional
-
-from fastapi import FastAPI, Query
-from sqlalchemy import select
 from urllib.parse import urlencode
 
+from fastapi import FastAPI, Query
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
+
+from sqlalchemy import select, func, case
 
 from app.db import SessionLocal
 from app.models import UserAccess, Event, Tenant
@@ -111,7 +111,6 @@ async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
     raw = urlencode({k: "" if v is None else v for k, v in params.items()})
     amt = _parse_amount(params.get("sumdep"))
 
-    # вычисляем допустимые колонки
     cols = {c.name for c in Event.__table__.columns}
 
     values = {
@@ -123,14 +122,12 @@ async def _log_event(kind: str, ua: Optional[UserAccess], params: dict):
         "raw_qs": raw,
         "created_at": datetime.utcnow(),
     }
-    # аккуратно добавляем trader_id, только если колонка существует
     if "trader_id" in cols:
         values["trader_id"] = params.get("trader_id")
 
     async with SessionLocal() as s:
         await s.execute(Event.__table__.insert().values(**values))
         await s.commit()
-
 
 
 # Надёжная отправка экрана с ретраем и логами
@@ -269,6 +266,11 @@ async def _check_secret(tenant_id: int, secret: Optional[str]) -> bool:
     return secret == must
 
 
+def _tid_matches(ua: UserAccess, tid_param: Optional[int]) -> bool:
+    """Запрещаем кросс-тенант: либо tid отсутствует, либо строго равен ua.tenant_id."""
+    return tid_param is None or tid_param == ua.tenant_id
+
+
 # =========================
 #         Endpoints
 # =========================
@@ -282,9 +284,15 @@ async def pp_reg(
     ua = await _load_by_click(click_id)
     if not ua:
         return _nf(click_id=click_id)
-    tenant_id = tid or ua.tenant_id
+
+    # Полностью доверяем tenant_id из UA
+    tenant_id = ua.tenant_id
+    if not _tid_matches(ua, tid):
+        # tid подменён — не выдаём подробностей
+        await _log_event("reg", ua, {"click_id": click_id, "trader_id": trader_id, "tid": tid})
+        return _err("bad_secret")
     if not await _check_secret(tenant_id, secret):
-        await _log_event("reg", ua, {"click_id": click_id, "trader_id": trader_id, "tid": tenant_id, "secret": secret})
+        await _log_event("reg", ua, {"click_id": click_id, "trader_id": trader_id, "tid": tenant_id})
         return _err("bad_secret")
 
     async with SessionLocal() as s:
@@ -312,26 +320,37 @@ async def pp_ftd(
     ua = await _load_by_click(click_id)
     if not ua:
         return _nf(click_id=click_id)
-    tenant_id = tid or ua.tenant_id
+
+    tenant_id = ua.tenant_id
+    if not _tid_matches(ua, tid):
+        await _log_event("ftd", ua, {"click_id": click_id, "sumdep": sumdep or sum_alt or amount_alt, "tid": tid})
+        return _err("bad_secret")
     if not await _check_secret(tenant_id, secret):
         eff_sum = sumdep or sum_alt or amount_alt
-        await _log_event("ftd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id, "secret": secret})
+        await _log_event("ftd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id})
         return _err("bad_secret")
 
     eff_sum = sumdep or sum_alt or amount_alt
 
-    # ставим флаг "есть депозит" на FTD сразу
+    # FTD: has_deposit=1, total_deposits минимум 1, но не уменьшаем существующее
     async with SessionLocal() as s:
         vals = {
             "has_deposit": True,
-            "total_deposits": max(1, (ua.total_deposits or 0)),
+            "total_deposits": case(
+                (func.coalesce(UserAccess.total_deposits, 0) == 0, 1),
+                else_=UserAccess.total_deposits
+            ),
         }
         if trader_id and not ua.trader_id:
             vals["trader_id"] = trader_id
-        await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(**vals))
+
+        await s.execute(
+            UserAccess.__table__.update()
+            .where(UserAccess.id == ua.id)
+            .values(**vals)
+        )
         await s.commit()
 
-    # лог с пробросом trader_id и нормализуемой суммой
     await _log_event("ftd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id, "trader_id": trader_id})
 
     # platinum check
@@ -365,23 +384,32 @@ async def pp_rd(
     ua = await _load_by_click(click_id)
     if not ua:
         return _nf(click_id=click_id)
-    tenant_id = tid or ua.tenant_id
+
+    tenant_id = ua.tenant_id
+    if not _tid_matches(ua, tid):
+        await _log_event("rd", ua, {"click_id": click_id, "sumdep": sumdep or sum_alt or amount_alt, "tid": tid})
+        return _err("bad_secret")
     if not await _check_secret(tenant_id, secret):
         eff_sum = sumdep or sum_alt or amount_alt
-        await _log_event("rd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id, "secret": secret})
+        await _log_event("rd", ua, {"click_id": click_id, "sumdep": eff_sum, "tid": tenant_id})
         return _err("bad_secret")
 
     eff_sum = sumdep or sum_alt or amount_alt
 
-    new_count = (ua.total_deposits or 0) + 1
+    # RD: атомарный инкремент total_deposits, ставим has_deposit=1
     async with SessionLocal() as s:
         vals = {
-            "has_deposit": True,              # RD тоже помечаем как "депозит есть"
-            "total_deposits": new_count,
+            "has_deposit": True,
+            "total_deposits": func.coalesce(UserAccess.total_deposits, 0) + 1,
         }
         if trader_id and not ua.trader_id:
             vals["trader_id"] = trader_id
-        await s.execute(UserAccess.__table__.update().where(UserAccess.id == ua.id).values(**vals))
+
+        await s.execute(
+            UserAccess.__table__.update()
+            .where(UserAccess.id == ua.id)
+            .values(**vals)
+        )
         await s.commit()
 
     # лог с пробросом trader_id
@@ -402,7 +430,7 @@ async def pp_rd(
             await s.commit()
 
     await _push_next_screen(ua.id)
-    return _ok(total_deposits=new_count, amount=_parse_amount(eff_sum))
+    return _ok(total_deposits=None, amount=_parse_amount(eff_sum))  # total_deposits можно не возвращать
 
 
 @app.get("/pp/debug")

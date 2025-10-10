@@ -58,7 +58,7 @@ def _fmt_money(x: float | int | None) -> str:
 WELCOME_OK_RU = (
     "Привет! Вижу ты из приватки — доступ разрешён.\n\n"
     "Отправь API-токен твоего бота, которого хочешь подключить.\n"
-    "Важно: можно подключить только *1 бота*."
+    "Важно: можно подключить только <b>1 бота</b>."
 )
 WELCOME_NO_RU = (
     "Извините, вы не находитесь в моей приватке. Напишите мне для уточнения информации."
@@ -79,6 +79,10 @@ async def on_start(m: Message):
     except TelegramForbiddenError:
         await m.answer("Я не админ в приватном канале. Добавьте меня админом и повторите.")
         return
+    except Exception:
+        # на случай, если PRIVATE_CHANNEL_ID не задан/некорректен
+        await m.answer(WELCOME_NO_RU)
+        return
 
     async with SessionLocal() as s:
         res = await s.execute(select(Tenant).where(Tenant.owner_telegram_id == user_id))
@@ -86,13 +90,13 @@ async def on_start(m: Message):
         if tenant and tenant.bot_username:
             await m.answer(
                 f"У вас уже подключён бот @{tenant.bot_username}. "
-                f"Если хотите заменить — напишите мне, сделаем замену - старый будет отключён."
+                f"Если хотите заменить — напишите мне, сделаем замену: старый будет отключён."
             )
 
 
 @router.message(F.text.regexp(r"^\d{6,}:[A-Za-z0-9_-]{20,}$"))
 async def on_token(m: Message):
-    token = m.text.strip()
+    token = (m.text or "").strip()
     user_id = m.from_user.id
 
     test_bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
@@ -123,9 +127,10 @@ async def on_token(m: Message):
             tenant.is_active = True
         await s.commit()
 
+    link = f"https://t.me/{username}" if username else "https://t.me/"
     await m.answer(
-        "Ваш бот подключен! Перейдите и продолжите настройку уже там: "
-        f"https://t.me/{username if username else 'your_bot'}"
+        "Ваш бот подключён! Перейдите и продолжите настройку уже там: "
+        f"{link}"
     )
 
 
@@ -240,7 +245,6 @@ async def ga_deploy(c: CallbackQuery):
         await c.message.answer(f"❌ Деплой завершился с ошибкой (exit {code}).\n<pre>{tail}</pre>")
 
 
-
 @router.callback_query(F.data == "ga:restart_children")
 async def ga_restart_children(c: CallbackQuery):
     if not _is_ga(c.from_user.id):
@@ -300,8 +304,13 @@ async def _show_tenant_card(c: CallbackQuery, tenant_id: int):
     await c.answer()
 
 
-@router.callback_query(F.data.startswith("ga:t:") & ~F.data.contains(":start:") & ~F.data.contains(":pause:") &
-                       ~F.data.contains(":restart:") & ~F.data.contains(":delete"))
+@router.callback_query(
+    F.data.startswith("ga:t:")
+    & ~F.data.contains(":start:")
+    & ~F.data.contains(":pause:")
+    & ~F.data.contains(":restart:")
+    & ~F.data.contains(":delete")
+)
 async def ga_tenant_open(c: CallbackQuery):
     if not _is_ga(c.from_user.id):
         return
