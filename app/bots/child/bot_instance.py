@@ -612,11 +612,25 @@ async def upsert_override(
             raw_vals["primary_btn_text"] = primary_btn_text
         if body_html is not None:
             raw_vals["body_html"] = body_html
+
+        # ⚠️ ВАЖНО: buttons_json всегда приводим к dict, НИКОГДА не json.dumps
         if buttons_json is not None:
-            if isinstance(buttons_json, str):
-                raw_vals["buttons_json"] = buttons_json
+            parsed: dict
+            if isinstance(buttons_json, dict):
+                parsed = buttons_json
+            elif isinstance(buttons_json, str):
+                try:
+                    tmp = json.loads(buttons_json)
+                    if isinstance(tmp, dict):
+                        parsed = tmp
+                    else:
+                        # допускаем только объект
+                        parsed = {}
+                except Exception:
+                    parsed = {}
             else:
-                raw_vals["buttons_json"] = json.dumps(buttons_json, ensure_ascii=False)
+                parsed = {}
+            raw_vals["buttons_json"] = parsed
 
         for k, v in {
             "image_path": image_path,
@@ -639,6 +653,7 @@ async def upsert_override(
             base = {"tenant_id": tenant_id, "lang": lang, "screen": screen}
             await s.execute(table.insert().values(**base, **vals))
         await s.commit()
+
 
 # -------- common send --------
 async def send_screen(
