@@ -798,13 +798,15 @@ def build_lang_kb(current: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t(current, "back"), callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def kb_howto_min(lang: str, support_url: str) -> InlineKeyboardMarkup:
+def kb_howto_min(lang: str, support_url: str, labels: Optional[dict] = None) -> InlineKeyboardMarkup:
+    labels = labels or {}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(lang, "btn_support"), url=support_url)],
-            [InlineKeyboardButton(text=t(lang, "back"), callback_data="menu")],
+            [InlineKeyboardButton(text=labels.get("support", t(lang, "btn_support")), url=support_url)],
+            [InlineKeyboardButton(text=labels.get("back", t(lang, "back")), callback_data="menu")],
         ]
     )
+
 
 # =========================
 #   Admin content keyboards
@@ -1390,8 +1392,11 @@ def make_child_router(tenant_id: int) -> Router:
         body = _render_template(body_override or body_default, {"ref": _render_ref_anchor(ref)})
 
         text = f"<b>{title}</b>\n\n{body}"
-        # было: kb_open_app(lang, sup, buttons)
-        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_howto_min(lang, sup))
+
+        # НОВОЕ:
+        btns = await resolve_buttons(tenant_id, lang, "howto")
+
+        await send_screen(c.bot, tenant_id, c.message.chat.id, lang, "howto", text, kb_howto_min(lang, sup, btns))
         await c.answer()
 
     @router.callback_query(F.data == "signal")
@@ -1964,7 +1969,7 @@ def make_child_router(tenant_id: int) -> Router:
         elif screen == "platinum":
             kb = kb_open_platinum(lang, sup, btns)
         elif screen == "howto":
-            kb = kb_howto_min(lang, sup)
+            kb = kb_howto_min(lang, sup, btns)
         elif screen == "lang":
             kb = build_lang_kb(lang)
         else:
